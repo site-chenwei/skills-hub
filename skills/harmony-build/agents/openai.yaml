@@ -1,4 +1,4 @@
 interface:
   display_name: "Harmony Build"
   short_description: "Help with HarmonyOS WSL/Windows build verification and cached env baselines"
-  default_prompt: "Use $harmony-build to establish or refresh a HarmonyOS Windows-side ready baseline, then reuse it for hvigor verification."
+  default_prompt: "Use $harmony-build only when the user needs a HarmonyOS Windows-side build/package/install verdict, or when the change likely affects the hvigor build path. Reuse cached ready baselines, do not rerun detect mechanically, do not compile for small non-build-affecting edits when cheaper minimal validation is sufficient, and do not default to assembleApp when a smaller hvigor task can justify the claim."

@@ -9,6 +9,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 
 这个 Skill 用于 HarmonyOS / OpenHarmony 项目的 Windows 侧构建验证。它会解析仓库路径、探测 `NODE_HOME` / `DEVECO_SDK_HOME` / `hvigorw.bat`、识别常见环境漂移，并在需要时通过 PowerShell 注入有效环境后执行 Windows 原生 `hvigorw.bat`。一次完整探测成功后，会按仓库缓存一个 ready baseline；后续同仓库任务默认复用它，而不是每次重新探测。
 
+它不是“每次改完代码都要自动编译”的通用规则。只有在需要给出 Harmony Windows 侧构建结论，或改动明显影响构建/打包/签名链路时，才进入 `verify`。边界清晰的小改动应继续遵循“受影响范围内的最小充分验证”。
+
 ## 何时使用
 
 - 用户要求编译、打包、签名、安装或验证 HarmonyOS 项目。
@@ -16,6 +18,31 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 - 用户提到 `NODE_HOME`、`DEVECO_SDK_HOME`、`SDK component missing`、`hvigor daemon` 等错误。
 - 当前编辑环境在 WSL，但最终构建结论必须以 Windows 原生工具链为准。
 - 仓库路径可能是 `/mnt/<drive>/...`，也可能已经是 `D:\...`。
+
+## 何时不要默认使用
+
+- 只是做文档、注释、提示词、README、纯文案之类不影响 Harmony 构建链路的改动。
+- 改动边界很小，且已有更便宜的最小充分验证可以覆盖主要风险，例如单元测试、静态检查或脚本级回归。
+- 用户没有要求构建结论，而你也不需要用 Windows 侧 `hvigorw.bat` 来证明本次改动是否成立。
+
+## 编译验证声明
+
+- 默认不编译。`harmony-build` 不是“只要改了 Harmony 项目代码就跑编译”的工作流。
+- 只有命中以下任一条件时，才进入 Windows 侧编译验证：
+  - 用户明确要求编译、打包、签名、安装，或要求确认“是否能构建通过”。
+  - 你需要给出最终的 Windows 侧构建结论。
+  - 改动明显影响 hvigor 构建链路，例如 `build-profile.json5`、`hvigorfile.*`、模块依赖、签名配置、打包配置、构建脚本、工具链或 SDK/Node 相关配置。
+  - 更便宜的最小验证已经不足以覆盖风险，且问题大概率位于构建层。
+- 命中以下情况时，不应默认进入编译验证：
+  - 文档、注释、提示词、README、纯文案修改。
+  - 仅改测试、脚本说明、非构建链路的辅助代码，且已有更小验证覆盖。
+  - 小范围代码改动可以通过单测、静态检查、脚本级回归或手工最小路径验证充分证明。
+  - 用户没有要构建结论，你也不打算输出“Windows 侧构建通过/失败”。
+- 即使决定进入 `harmony-build`，也按下面的优先级选动作，而不是直接跑 `assembleApp`：
+  - 只确认环境是否 ready：`detect`
+  - 只确认 SDK / hvigor 基线是否可用：`verify --task tasks`
+  - 需要模块或特定任务结论：`verify --task <smaller-task>`
+  - 只有明确需要 App 级产物结论时，才运行 `verify --task assembleApp`
 
 ## 工作流
 
@@ -46,11 +73,17 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
      - `python3 scripts/harmony_build.py verify --repo <repo-wsl-path> --task tasks`
      - `python scripts/harmony_build.py verify --repo <repo-windows-path> --task tasks`
      - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task tasks`
-6. 运行实际构建验证。
+6. 仅在需要最终构建结论时运行实际构建验证。
+   - 典型触发场景：
+     - 用户明确要求编译、打包、签名、安装或“确认构建是否通过”
+     - 改动涉及构建脚本、依赖、配置、模块接线、产物打包或其他明显影响 hvigor 结果的内容
+     - 你准备给出“Windows 侧构建通过/失败”的最终结论
+   - 不要把 `assembleApp` 当成默认任务；优先选择能支撑当前结论的最小 hvigor 任务。
+   - 只有在用户明确需要 App 级产物、安装包，或改动明显影响 App 聚合打包链路时，才使用 `assembleApp`。
    - 示例：
-     - `python3 scripts/harmony_build.py verify --repo <repo-wsl-path> --task assembleApp`
-     - `python scripts/harmony_build.py verify --repo <repo-windows-path> --task assembleApp`
-     - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task assembleApp`
+     - `python3 scripts/harmony_build.py verify --repo <repo-wsl-path> --task <task>`
+     - `python scripts/harmony_build.py verify --repo <repo-windows-path> --task <task>`
+     - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task <task>`
 7. 明确说明结论来源：
    - 是来自 Windows 侧 `hvigorw.bat` 实际验证
    - 还是仅来自静态检查 / 环境探测 / 已缓存的 ready baseline
@@ -87,8 +120,10 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 
 ## 输出规则
 
-- 最终构建结论必须来自 Windows 侧 `verify`。
+- 只有在需要给出最终构建结论时，才要求使用 Windows 侧 `verify`。
 - 同仓库已有 ready baseline 时，可以把环境判定直接建立在该基线之上；不要机械地重复跑 `detect`。
+- 不要把“小改动也默认重跑编译”当成工作流常态；优先选择受影响范围内的最小充分验证。
+- 不要把 `assembleApp` 当成默认验证命令；除非本次任务确实需要 App 级产物结论。
 - `hvigor daemon failed to listen on the port` 在后续退回 `no-daemon mode` 且命令成功时，不视为阻塞。
 - 如果没有找到可工作的 SDK 根，报告环境阻塞，不要猜测代码问题。
 - 不要默认把 `...\\sdk\\default` 或 `...\\OpenHarmony\\Sdk` 当成最终 `DEVECO_SDK_HOME`，除非 probe 已证明该值可工作。
