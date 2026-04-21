@@ -1,11 +1,11 @@
 """查询外部 DocsHub 索引。
 
 用法示例：
-    python3 scripts/search_docs.py --hub-root /path/to/hub --list-docsets
-    python3 scripts/search_docs.py --hub-root /path/to/hub 输入法 --top 10
-    python3 scripts/search_docs.py 光标 跟随 --match all --docset harmonyos --top 5
-    python3 scripts/search_docs.py pdd.mall.info.get --docset pinduoduo
-    python3 scripts/search_docs.py --rebuild-stale 订单 --top 8
+    python3 run.py search --hub-root /path/to/hub --list-docsets
+    python3 run.py search --hub-root /path/to/hub 输入法 --top 10
+    python3 run.py search 光标 跟随 --match all --docset harmonyos --top 5
+    python3 run.py search pdd.mall.info.get --docset pinduoduo
+    python3 run.py refresh 订单 --top 8
 
 排序权重：bm25(chunks, 10.0, 6.0, 1.0) — title:10 symbols:6 body:1
 默认过滤 is_nav=1 的导航页；--include-nav 可带出。
@@ -310,7 +310,7 @@ def ensure_index_ready(
     if not db.exists() and not rebuild_stale:
         print(
             f"[error] docset '{docset_id}' 索引缺失: {db}\n"
-            f"  可手动运行: python3 {Path(__file__).parent / 'build_docset_index.py'} --hub-root {hub_root} --docset {docset_id}",
+            f"  可手动运行: python3 {Path(__file__).parent.parent / 'run.py'} reinit --hub-root {hub_root} --docset {docset_id}",
             file=sys.stderr,
         )
         return None

@@ -7,6 +7,11 @@ description: Use this skill when entering an unfamiliar repository, before cross
 
 在真正修改代码前，先抽出项目事实、任务边界、约束条件和验证路径，避免在陌生仓库里靠猜推进。
 
+## 运行约定
+
+- 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
+- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径，也不要假设 Skill 一定位于 `~/.codex/skills/.system/` 下。
+
 ## 何时使用
 
 - 初次进入陌生仓库，或当前上下文不足以安全动手。
@@ -19,7 +24,7 @@ description: Use this skill when entering an unfamiliar repository, before cross
 ## 工作流
 
 1. 先跑事实扫描。
-   - 优先执行 `python3 scripts/project_facts.py --repo <repo> --format markdown`
+   - 优先执行 `python3 <skill_root>/run.py project_facts --repo <repo> --format markdown`
    - 用它先拿到文档入口、技术栈信号、顶层目录、验证命令候选和待确认项。
 2. 再读关键入口。
    - 默认顺序是 `PROJECT.md` -> `README*` -> 顶层配置文件 -> `docs/` -> 关键入口源码与测试。

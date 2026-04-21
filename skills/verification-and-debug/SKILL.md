@@ -7,6 +7,11 @@ description: Use this skill for build failures, failing tests, runtime bugs, reg
 
 先稳定复现，再定位故障层，再做最小修复并重新验证；不靠连续猜修换取表面“可运行”。
 
+## 运行约定
+
+- 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
+- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
+
 ## 何时使用
 
 - 编译失败、测试失败、运行时报错、回归、卡死、异常输出。
@@ -23,7 +28,7 @@ description: Use this skill for build failures, failing tests, runtime bugs, reg
 ## 工作流
 
 1. 先捕获失败上下文。
-   - 可复现时优先执行 `python3 scripts/capture_failure.py --cwd <repo> -- <cmd>`
+   - 可复现时优先执行 `python3 <skill_root>/run.py capture_failure --cwd <repo> -- <cmd>`
    - 先拿到退出码、stdout/stderr 尾部、初步分类和下一步建议。
 2. 稳定复现并判断故障层级。
    - 先判断问题位于构建、测试、运行时、配置、依赖、网络、权限还是外部系统。

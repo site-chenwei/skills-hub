@@ -22,7 +22,7 @@
 
 ## 仓库布局
 
-所有 Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 `tests/` 中补最小回归验证。
+所有 Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 Skill 根目录暴露统一的 `run.py` 入口。调用时先取当前已打开 `SKILL.md` 的所在目录作为 `<skill_root>`，再执行 `python3 <skill_root>/run.py ...`，不要手拼 `scripts/*.py` 的安装绝对路径。
 
 ## 使用 CC Switch 安装
 

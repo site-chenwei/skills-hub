@@ -2,7 +2,7 @@
 
 ## 推荐顺序
 
-1. 先跑 `scripts/project_facts.py` 拿到仓库事实草图。
+1. 先跑 `python3 <skill_root>/run.py project_facts ...` 拿到仓库事实草图。
 2. 读 `PROJECT.md` 与 `README*`，确认项目目标和任务上下文。
 3. 读顶层配置与清单文件，确认技术栈、包管理器、测试入口、运行前提。
 4. 只在当前任务需要时补读 `docs/`、关键源码与测试。

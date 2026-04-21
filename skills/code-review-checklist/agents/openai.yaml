@@ -1,4 +1,4 @@
 interface:
-  display_name: "代码审查清单"
+  display_name: "code-review-checklist"
   short_description: "Scope diffs, rank findings, and call out regression and test risks."
-  default_prompt: "Use $code-review-checklist to scope the diff first, then report evidence-backed findings, severity, and test gaps."
+  default_prompt: "Use $code-review-checklist to scope the diff first, then report evidence-backed findings, severity, and test gaps. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call python3 <skill_root>/run.py ..."

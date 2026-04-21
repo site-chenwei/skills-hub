@@ -47,15 +47,15 @@ Minimal shape:
 Read-only search:
 
 ```bash
-python3 <skill_root>/scripts/search_docs.py --hub-root <hub_root> 输入法 --top 8
-python3 <skill_root>/scripts/search_docs.py --hub-root <hub_root> 光标 跟随 --match all --docset harmonyos --top 5
+python3 <skill_root>/run.py search --hub-root <hub_root> 输入法 --top 8
+python3 <skill_root>/run.py search --hub-root <hub_root> 光标 跟随 --match all --docset harmonyos --top 5
 ```
 
 Refresh only on explicit user request:
 
 ```bash
-python3 <skill_root>/scripts/search_docs.py --hub-root <hub_root> --rebuild-stale 输入法 --top 8
-python3 <skill_root>/scripts/build_docset_index.py --hub-root <hub_root> --docset harmonyos
+python3 <skill_root>/run.py refresh --hub-root <hub_root> 输入法 --top 8
+python3 <skill_root>/run.py reinit --hub-root <hub_root> --docset harmonyos
 ```
 
 ## Notes

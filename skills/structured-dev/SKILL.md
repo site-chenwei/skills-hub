@@ -7,6 +7,11 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 
 在复杂任务里，按“研究与分析 -> 方案构思 -> 代码开发 -> 复查 -> 编译与验证”的顺序推进，减少拍脑袋决策和散乱改动。
 
+## 运行约定
+
+- 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
+- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
+
 ## 何时启用
 
 - 新功能、重构、跨模块多文件改动。
@@ -21,7 +26,7 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 ## 工作流
 
 1. 先生成变更简报。
-   - 优先执行 `python3 scripts/change_plan.py --repo <repo> --paths <paths...> [flags]`
+   - 优先执行 `python3 <skill_root>/run.py change_plan --repo <repo> --paths <paths...> [flags]`
    - 用它先判断走 light 还是 full 模式，并拿到阶段、验证要求和建议串联的 skill。
 2. 研究与分析
    - 检查目标、预期结果、边界范围、约束条件，并确认项目事实入口与验证路径。

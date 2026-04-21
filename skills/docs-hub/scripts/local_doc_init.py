@@ -260,7 +260,7 @@ def main() -> None:
     write_init_state_atomic(state_path, state)
     print(f"[init] 完成: {state_path}")
     print(f"[init] 已记录 DocsHub 根目录: {hub_root}")
-    print(f"[init] 后续可直接运行: python3 {root / 'scripts' / 'search_docs.py'} <keywords>")
+    print(f"[init] 后续可直接运行: python3 {root / 'run.py'} search <keywords>")
 
 
 if __name__ == "__main__":

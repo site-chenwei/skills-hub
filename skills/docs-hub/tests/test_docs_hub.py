@@ -15,7 +15,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-MANAGED_SKILL_ENTRIES = ["SKILL.md", "agents", "references", "requirements-build.txt", "scripts"]
+MANAGED_SKILL_ENTRIES = ["SKILL.md", "agents", "references", "requirements-build.txt", "run.py", "scripts"]
 BUILD_SCRIPT = SKILL_ROOT / "scripts" / "build_docset_index.py"
 SEARCH_SCRIPT = SKILL_ROOT / "scripts" / "search_docs.py"
 INIT_SCRIPT = SKILL_ROOT / "scripts" / "local_doc_init.py"

@@ -11,6 +11,12 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 
 它不是“每次改完代码都要自动编译”的通用规则。只有在需要给出 Harmony Windows 侧构建结论，或改动明显影响构建/打包/签名链路时，才进入 `verify`。边界清晰的小改动应继续遵循“受影响范围内的最小充分验证”。
 
+## 运行约定
+
+- 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
+- Python 入口统一通过 `python3 <skill_root>/run.py ...` 或 `python <skill_root>/run.py ...` 调用，不要手拼 `scripts/harmony_build.py` 的绝对路径。
+- 仅在明确需要 PowerShell 包装时，才直接使用 `.\scripts\harmony_build.ps1`。
+
 ## 何时使用
 
 - 用户要求编译、打包、签名、安装或验证 HarmonyOS 项目。
@@ -52,8 +58,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 如果仓库无法解析到 Windows 驱动器路径，不要给出最终 Windows 构建结论。
 2. 首次建立或显式刷新环境基线。
    - 示例：
-     - `python3 scripts/harmony_build.py detect --repo <repo-wsl-path>`
-     - `python scripts/harmony_build.py detect --repo <repo-windows-path>`
+     - `python3 <skill_root>/run.py detect --repo <repo-wsl-path>`
+     - `python <skill_root>/run.py detect --repo <repo-windows-path>`
      - `.\scripts\harmony_build.ps1 detect --repo <repo-windows-path>`
    - 默认情况下，`detect` 会探测 SDK 候选根，并用 `hvigorw.bat tasks` 做一次 preflight；ready 时会把结果保存成该仓库的缓存基线。
    - 后续再次执行 `detect` 时，若该仓库已有可用 ready baseline，会直接复用缓存并快速返回。
@@ -70,8 +76,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 第 2 步使用了 `--skip-sdk-probe`
    - 你需要一个单独、可复述的 `tasks` 验证结果
    - 示例：
-     - `python3 scripts/harmony_build.py verify --repo <repo-wsl-path> --task tasks`
-     - `python scripts/harmony_build.py verify --repo <repo-windows-path> --task tasks`
+     - `python3 <skill_root>/run.py verify --repo <repo-wsl-path> --task tasks`
+     - `python <skill_root>/run.py verify --repo <repo-windows-path> --task tasks`
      - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task tasks`
 6. 仅在需要最终构建结论时运行实际构建验证。
    - 典型触发场景：
@@ -81,8 +87,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 不要把 `assembleApp` 当成默认任务；优先选择能支撑当前结论的最小 hvigor 任务。
    - 只有在用户明确需要 App 级产物、安装包，或改动明显影响 App 聚合打包链路时，才使用 `assembleApp`。
    - 示例：
-     - `python3 scripts/harmony_build.py verify --repo <repo-wsl-path> --task <task>`
-     - `python scripts/harmony_build.py verify --repo <repo-windows-path> --task <task>`
+     - `python3 <skill_root>/run.py verify --repo <repo-wsl-path> --task <task>`
+     - `python <skill_root>/run.py verify --repo <repo-windows-path> --task <task>`
      - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task <task>`
 7. 明确说明结论来源：
    - 是来自 Windows 侧 `hvigorw.bat` 实际验证
@@ -95,21 +101,21 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 
 ## 入口脚本
 
-- `scripts/harmony_build.py detect`
+- `<skill_root>/run.py detect`
   - 探测运行宿主、仓库本地路径、仓库 Windows 路径、`NODE_HOME`、`node.exe`、`DEVECO_SDK_HOME`、`hvigorw.bat` 和 NVM 残留。
   - 默认会 probe SDK 候选根，并通过 `hvigorw.bat tasks` 选出第一个可工作的 SDK 根。
   - ready 时会把结果保存成按仓库隔离的缓存基线；后续默认优先复用该基线。
   - `--refresh` 用于忽略缓存并重跑完整探测。
   - `--skip-sdk-probe` 用于跳过 preflight，只做静态环境探测；它不会刷新缓存基线。
 
-- `scripts/harmony_build.py verify`
+- `<skill_root>/run.py verify`
   - 默认优先复用缓存基线；缺失、失效或显式 `--refresh` 时，才重新探测并刷新基线。
   - 重新构建 Windows `Path`，并把已解析出的 `NODE_HOME` 与 `DEVECO_SDK_HOME` 注入到 PowerShell 会话。
   - 在仓库对应的 Windows 路径下执行 `hvigorw.bat <task>`。
   - 如果环境未 ready，会直接返回 `exit_code = 1`，不会启动 `hvigorw.bat`。
   - 如果缓存命中的验证报出典型环境错误，会自动刷新一次基线后重试。
 
-- `scripts/harmony_build.py print-env`
+- `<skill_root>/run.py print-env`
   - 默认优先复用缓存基线；显式 `--refresh` 时重新探测。
   - 输出一个 PowerShell 片段，便于在旧终端中手动注入环境后重试。
   - 它依赖仓库 Windows 路径、`NODE_HOME` 和 `DEVECO_SDK_HOME` 都已成功解析；缺任一项都会失败。

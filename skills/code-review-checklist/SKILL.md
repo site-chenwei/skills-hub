@@ -7,6 +7,11 @@ description: Use this skill when the user asks for a review, patch review, PR re
 
 以代码评审视角审查变更，优先找出会影响行为、稳定性和可维护性的真实问题，而不是先做风格点评。
 
+## 运行约定
+
+- 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
+- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
+
 ## 何时使用
 
 - 用户明确说“review”“审查”“看下这次改动有没有问题”“查回归风险”。
@@ -16,7 +21,7 @@ description: Use this skill when the user asks for a review, patch review, PR re
 ## 审查流程
 
 1. 先收敛范围。
-   - 优先执行 `python3 scripts/review_scope.py --repo <repo> --format markdown`
+   - 优先执行 `python3 <skill_root>/run.py review_scope --repo <repo> --format markdown`
    - 在有明确 base/head 时传入 `--base <rev> [--head <rev>]`
    - 先看文件分类、风险标签、测试缺口和高改动文件，再决定补读哪些上下文。
 2. 再看真实风险。
