@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目入口对齐"
+  short_description: "Scan repo facts, stack signals, and validation paths before risky work."
+  default_prompt: "Use $project-onboarding to scan repository facts, confirm scope, and identify the smallest valid verification path before changing code."

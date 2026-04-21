@@ -1,0 +1,4 @@
+interface:
+  display_name: "验证与排障"
+  short_description: "Capture failures, isolate the broken layer, and verify root-cause fixes."
+  default_prompt: "Use $verification-and-debug to capture the failing command, classify the broken layer, and verify the smallest root-cause fix."

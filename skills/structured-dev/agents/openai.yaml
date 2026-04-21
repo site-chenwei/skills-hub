@@ -1,0 +1,4 @@
+interface:
+  display_name: "结构化开发"
+  short_description: "Generate change briefs, choose workflow depth, and enforce validation gates."
+  default_prompt: "Use $structured-dev to generate a change brief, choose light vs full workflow, and deliver the task with explicit review and verification gates."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "代码审查清单"
+  short_description: "Scope diffs, rank findings, and call out regression and test risks."
+  default_prompt: "Use $code-review-checklist to scope the diff first, then report evidence-backed findings, severity, and test gaps."

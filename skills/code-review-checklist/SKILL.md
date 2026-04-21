@@ -1,0 +1,51 @@
+---
+name: code-review-checklist
+description: Use this skill when the user asks for a review, patch review, PR review, change audit, or regression check. Focus on scoping the diff first, then finding logic bugs, contract drift, missing tests, and performance, security, or stability risks with evidence.
+---
+
+# 代码审查清单
+
+以代码评审视角审查变更，优先找出会影响行为、稳定性和可维护性的真实问题，而不是先做风格点评。
+
+## 何时使用
+
+- 用户明确说“review”“审查”“看下这次改动有没有问题”“查回归风险”。
+- 需要对 diff、提交、补丁或多文件改动做静态审查。
+- 需要给出 findings、风险分级、测试缺口和剩余风险。
+
+## 审查流程
+
+1. 先收敛范围。
+   - 优先执行 `python3 scripts/review_scope.py --repo <repo> --format markdown`
+   - 在有明确 base/head 时传入 `--base <rev> [--head <rev>]`
+   - 先看文件分类、风险标签、测试缺口和高改动文件，再决定补读哪些上下文。
+2. 再看真实风险。
+   - 逻辑错误、行为回归、边界条件、接口契约不一致、异常处理缺失、测试遗漏。
+3. 按需补看非功能风险。
+   - 性能、安全、稳定性、并发、资源释放、迁移兼容、发布链路。
+4. 判断验证是否充分。
+   - 检查现有测试、手工验证、构建命令是否真正覆盖受影响范围。
+5. 写 finding 时保留证据。
+   - 明确触发条件、影响、文件位置、为什么当前实现会出问题。
+
+## 输出格式
+
+- Findings 放在最前面，按严重级别排序。
+- 每条 finding 要写清：
+  风险点、触发条件、影响、对应文件和行号。
+- 没有足够证据时，不要把怀疑写成 finding；可以放到“待确认问题”。
+- 之后再写：
+  待确认问题、假设、简短总结、剩余风险或测试缺口。
+- 如果没有发现阻塞性问题，要明确写“未发现新的阻塞性 findings”，并补充残余风险。
+
+## 不要这样做
+
+- 先写长篇总结，再把 findings 埋在后面。
+- 用风格偏好淹没真正的行为风险。
+- 在没有运行验证命令的前提下写“测试通过”。
+- 因为实现看起来整洁就忽略契约和回归风险。
+
+## 深入参考
+
+- 需要更细的审查维度时，读取 [references/review-dimensions.md](references/review-dimensions.md)。
+- 需要统一 finding 严重级别和证据要求时，读取 [references/finding-severity.md](references/finding-severity.md)。

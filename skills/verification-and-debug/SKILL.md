@@ -1,0 +1,47 @@
+---
+name: verification-and-debug
+description: Use this skill for build failures, failing tests, runtime bugs, regressions, flaky behavior, and performance or stability issues. It enforces reproduce-first debugging, structured failure capture, layered fault isolation, minimal fixes, and explicit verification after each change.
+---
+
+# 验证与排障
+
+先稳定复现，再定位故障层，再做最小修复并重新验证；不靠连续猜修换取表面“可运行”。
+
+## 何时使用
+
+- 编译失败、测试失败、运行时报错、回归、卡死、异常输出。
+- 用户说“为什么不工作了”“帮我排障”“先定位根因”。
+- 性能、稳定性或多组件链路问题。
+
+## 核心规则
+
+- 不引入新的静默降级、伪成功、吞错、假数据或假执行路径。
+- 不在没有重新执行验证命令前声称“已修复”“已完成”“测试通过”。
+- 优先修根因，不修表象。
+- 能稳定复现时，先记录失败命令和环境，再决定加哪些观察点。
+
+## 工作流
+
+1. 先捕获失败上下文。
+   - 可复现时优先执行 `python3 scripts/capture_failure.py --cwd <repo> -- <cmd>`
+   - 先拿到退出码、stdout/stderr 尾部、初步分类和下一步建议。
+2. 稳定复现并判断故障层级。
+   - 先判断问题位于构建、测试、运行时、配置、依赖、网络、权限还是外部系统。
+3. 补观察点。
+   - 只增加必要日志、断点、断言或临时检查，不做大面积噪声打印。
+4. 基于证据提出根因假设。
+   - 假设必须能解释现象；解释不了的线索不能强行忽略。
+5. 做最小修复。
+   - 避免把多个不确定修改绑在一起。
+6. 重新验证。
+   - 先跑最小充分验证；高风险问题再扩大验证范围。
+
+## 卡住时
+
+- 同一问题连续多次修改仍未解决时，要回退并换路径。
+- 如果是外部阻塞，要明确写出阻塞点、失败命令、缺失前提和剩余不确定性。
+
+## 深入参考
+
+- 需要更细的排障清单时，读取 [references/debug-checklist.md](references/debug-checklist.md)。
+- 需要把常见错误模式映射到故障层级和下一步动作时，读取 [references/failure-patterns.md](references/failure-patterns.md)。

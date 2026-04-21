@@ -1,0 +1,4 @@
+interface:
+  display_name: "Harmony Build"
+  short_description: "Help with HarmonyOS WSL/Windows build verification and cached env baselines"
+  default_prompt: "Use $harmony-build to establish or refresh a HarmonyOS Windows-side ready baseline, then reuse it for hvigor verification."
