@@ -5,6 +5,7 @@
 ## 当前 Skill
 
 - `harmony-build`
+- `docs-hub`
 - `project-onboarding`
 - `structured-dev`
 - `code-review-checklist`
@@ -17,6 +18,7 @@
 - `code-review-checklist`：支持变更范围分析，输出文件分类、风险标签和测试缺口
 - `verification-and-debug`：支持失败命令捕获，统一记录退出码、日志尾部和故障分类
 - `harmony-build`：支持 Windows 侧 Harmony 构建环境探测、缓存基线和 hvigor 验证
+- `docs-hub`：支持外部 DocsHub 根目录初始化、本地索引构建与文档检索；Skill bundle 本身不携带文档快照
 
 ## 仓库布局
 

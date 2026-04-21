@@ -7,3 +7,6 @@ __pycache__/
 .coverage
 .venv/
 venv/
+skills/*/.deps/
+skills/*/.skill-init.json
+**/*:Zone.Identifier
