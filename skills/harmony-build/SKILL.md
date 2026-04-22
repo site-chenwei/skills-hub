@@ -46,8 +46,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
   - 用户没有要构建结论，你也不打算输出“Windows 侧构建通过/失败”。
 - 即使决定进入 `harmony-build`，也按下面的优先级选动作，而不是直接跑 `assembleApp`：
   - 只确认环境是否 ready：`detect`
-  - 只确认 SDK / hvigor 基线是否可用：`verify --task tasks`
-  - 需要模块或特定任务结论：`verify --task <smaller-task>`
+  - 需要模块或特定任务结论，且你已经知道更小的有效任务名：直接运行 `verify --task <smaller-task>`
+  - 需要最终构建验证时：直接运行当前最小可证明的编译任务，不要先执行 `verify --task tasks`
   - 只有明确需要 App 级产物结论时，才运行 `verify --task assembleApp`
 
 ## 工作流
@@ -72,19 +72,17 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
      - 切换了目标仓库
      - 缓存命中的 `verify` 报出环境类错误
 4. 如果基线不完整、存在歧义，或需要解释错误来源，读取 `references/windows-build-baseline.md`。
-5. 仅在以下场景补跑显式 preflight：
-   - 第 2 步使用了 `--skip-sdk-probe`
-   - 你需要一个单独、可复述的 `tasks` 验证结果
-   - 示例：
-     - `python3 <skill_root>/run.py verify --repo <repo-wsl-path> --task tasks`
-     - `python <skill_root>/run.py verify --repo <repo-windows-path> --task tasks`
-     - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task tasks`
+5. 不把 `verify --task tasks` 放进默认构建路径。
+   - 它不是构建验证前置步骤，也不用来“先找更小任务”。
+   - 只有在用户明确要求查看任务列表，或你正在排查 hvigor / 环境问题时，才单独运行它。
 6. 仅在需要最终构建结论时运行实际构建验证。
    - 典型触发场景：
      - 用户明确要求编译、打包、签名、安装或“确认构建是否通过”
      - 改动涉及构建脚本、依赖、配置、模块接线、产物打包或其他明显影响 hvigor 结果的内容
      - 你准备给出“Windows 侧构建通过/失败”的最终结论
    - 不要把 `assembleApp` 当成默认任务；优先选择能支撑当前结论的最小 hvigor 任务。
+   - 需要构建验证时，直接发起所选编译任务；不要在前面再插入一轮 `verify --task tasks`。
+   - 如果你已知更小任务名，就直接跑它；如果没有，就直接跑当前最小可证明任务，而不是先做 task 探测。
    - 只有在用户明确需要 App 级产物、安装包，或改动明显影响 App 聚合打包链路时，才使用 `assembleApp`。
    - 示例：
      - `python3 <skill_root>/run.py verify --repo <repo-wsl-path> --task <task>`
@@ -128,6 +126,7 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 
 - 只有在需要给出最终构建结论时，才要求使用 Windows 侧 `verify`。
 - 同仓库已有 ready baseline 时，可以把环境判定直接建立在该基线之上；不要机械地重复跑 `detect`。
+- 需要构建验证时，直接运行目标编译任务；不要把 `verify --task tasks` 作为默认前置步骤。
 - 不要把“小改动也默认重跑编译”当成工作流常态；优先选择受影响范围内的最小充分验证。
 - 不要把 `assembleApp` 当成默认验证命令；除非本次任务确实需要 App 级产物结论。
 - `hvigor daemon failed to listen on the port` 在后续退回 `no-daemon mode` 且命令成功时，不视为阻塞。
