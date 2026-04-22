@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,16 @@ def init_state_path(root: Path | None = None) -> Path:
 
 def requirements_path(root: Path | None = None) -> Path:
     return (root or skill_root()) / REQUIREMENTS_FILE
+
+
+def format_command(parts: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
+
+
+def format_python_command(*parts: str | Path) -> str:
+    return format_command([sys.executable, *(str(part) for part in parts)])
 
 
 def requirements_hash(root: Path | None = None) -> str:
@@ -60,7 +72,7 @@ def ensure_initialized(command_label: str, root: Path | None = None) -> dict[str
     root = root or skill_root()
     state = load_init_state(root)
     init_script = root / "scripts" / "local_doc_init.py"
-    init_cmd = f"python3 {init_script} --skill-root {root}"
+    init_cmd = format_python_command(init_script, "--skill-root", root)
     if not state:
         raise SystemExit(
             f"[error] $docs-hub 尚未初始化，无法{command_label}。\n"

@@ -10,7 +10,8 @@ description: Use this skill when the user asks for a review, patch review, PR re
 ## 运行约定
 
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
-- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
+- 所有辅助脚本统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
+- 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 
 ## 何时使用
 
@@ -21,7 +22,7 @@ description: Use this skill when the user asks for a review, patch review, PR re
 ## 审查流程
 
 1. 先收敛范围。
-   - 优先执行 `python3 <skill_root>/run.py review_scope --repo <repo> --format markdown`
+   - 优先执行 `<python_cmd> <skill_root>/run.py review_scope --repo <repo> --format markdown`
    - 在有明确 base/head 时传入 `--base <rev> [--head <rev>]`
    - 先看文件分类、风险标签、测试缺口和高改动文件，再决定补读哪些上下文。
 2. 再看真实风险。

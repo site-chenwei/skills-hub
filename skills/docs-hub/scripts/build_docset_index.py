@@ -13,8 +13,8 @@
     - nav 页仍入库但打 is_nav=1，默认 search 时过滤；加 --include-nav 可带出
 
 用法：
-    python3 run.py reinit --hub-root /path/to/hub --docset harmonyos
-    python3 run.py reinit --docset all
+    <python_cmd> run.py reinit --hub-root /path/to/hub --docset harmonyos
+    <python_cmd> run.py reinit --docset all
 """
 
 from __future__ import annotations

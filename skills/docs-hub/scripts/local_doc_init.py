@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _bootstrap import (  # noqa: E402
     INIT_STATE_FILE,
     REQUIREMENTS_FILE,
+    format_python_command,
     load_init_state,
     requirements_hash,
     resolve_init_hub_root,
@@ -260,7 +261,7 @@ def main() -> None:
     write_init_state_atomic(state_path, state)
     print(f"[init] 完成: {state_path}")
     print(f"[init] 已记录 DocsHub 根目录: {hub_root}")
-    print(f"[init] 后续可直接运行: python3 {root / 'run.py'} search <keywords>")
+    print(f"[init] 后续可直接运行: {format_python_command(root / 'run.py', 'search', '<keywords>')}")
 
 
 if __name__ == "__main__":

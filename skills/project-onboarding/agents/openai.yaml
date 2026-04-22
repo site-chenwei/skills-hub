@@ -1,4 +1,4 @@
 interface:
   display_name: "project-onboarding"
   short_description: "Scan repo facts, stack signals, and validation paths before risky work."
-  default_prompt: "Use $project-onboarding to scan repository facts, confirm scope, and identify the smallest valid verification path before changing code. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call python3 <skill_root>/run.py ..., never guess a .system install path."
+  default_prompt: "Use $project-onboarding to scan repository facts, confirm scope, and identify the smallest valid verification path before changing code. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`), never guess a .system install path."

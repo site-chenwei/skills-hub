@@ -71,6 +71,8 @@ ENTRY_PATTERNS = (
     "cmd/main.go",
 )
 
+PYTHON_CMD_PLACEHOLDER = "<python_cmd>"
+
 
 def is_test_path(path_text: str) -> bool:
     lowered = path_text.lower()
@@ -297,7 +299,7 @@ def detect_validation_commands(
 
     if "python" in primary_stacks:
         if has_python_tests(repo):
-            add_candidate(candidates, "python3 -m unittest discover", "Python test files detected")
+            add_candidate(candidates, f"{PYTHON_CMD_PLACEHOLDER} -m unittest discover", "Python test files detected")
         if (
             pyproject_data is not None
             or (repo / "requirements.txt").exists()
@@ -305,11 +307,11 @@ def detect_validation_commands(
             or (repo / "tox.ini").exists()
             or (repo / "conftest.py").exists()
         ):
-            add_candidate(candidates, "python3 -m pytest", "Python project config detected")
+            add_candidate(candidates, f"{PYTHON_CMD_PLACEHOLDER} -m pytest", "Python project config detected")
         if (repo / "uv.lock").exists():
             add_candidate(candidates, "uv run python -m unittest discover", "uv.lock detected")
         if pyproject_data and "tool" in pyproject_data and "ruff" in pyproject_data["tool"]:
-            add_candidate(candidates, "python3 -m ruff check .", "pyproject defines Ruff config")
+            add_candidate(candidates, f"{PYTHON_CMD_PLACEHOLDER} -m ruff check .", "pyproject defines Ruff config")
     if (repo / "go.mod").exists():
         add_candidate(candidates, "go test ./...", "Go module detected")
     if (repo / "Cargo.toml").exists():

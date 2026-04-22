@@ -1,11 +1,11 @@
 """查询外部 DocsHub 索引。
 
 用法示例：
-    python3 run.py search --hub-root /path/to/hub --list-docsets
-    python3 run.py search --hub-root /path/to/hub 输入法 --top 10
-    python3 run.py search 光标 跟随 --match all --docset harmonyos --top 5
-    python3 run.py search pdd.mall.info.get --docset pinduoduo
-    python3 run.py refresh 订单 --top 8
+    <python_cmd> run.py search --hub-root /path/to/hub --list-docsets
+    <python_cmd> run.py search --hub-root /path/to/hub 输入法 --top 10
+    <python_cmd> run.py search 光标 跟随 --match all --docset harmonyos --top 5
+    <python_cmd> run.py search pdd.mall.info.get --docset pinduoduo
+    <python_cmd> run.py refresh 订单 --top 8
 
 排序权重：bm25(chunks, 10.0, 6.0, 1.0) — title:10 symbols:6 body:1
 默认过滤 is_nav=1 的导航页；--include-nav 可带出。
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _bootstrap import ensure_initialized, resolve_query_hub_root  # noqa: E402
+from _bootstrap import ensure_initialized, format_python_command, resolve_query_hub_root  # noqa: E402
 from _common import load_docsets  # noqa: E402
 from build_docset_index import DocsetBuildError, build_docset  # noqa: E402
 
@@ -310,7 +310,7 @@ def ensure_index_ready(
     if not db.exists() and not rebuild_stale:
         print(
             f"[error] docset '{docset_id}' 索引缺失: {db}\n"
-            f"  可手动运行: python3 {Path(__file__).parent.parent / 'run.py'} reinit --hub-root {hub_root} --docset {docset_id}",
+            f"  可手动运行: {format_python_command(Path(__file__).parent.parent / 'run.py', 'reinit', '--hub-root', hub_root, '--docset', docset_id)}",
             file=sys.stderr,
         )
         return None
@@ -585,8 +585,9 @@ def main() -> None:
             continue
         for r in rows:
             r["docset"] = ds["id"]
-            r["doc_root"] = str((hub_root / ds["root"]).resolve())
-            r["abs_path"] = str((hub_root / ds["root"] / r["rel_path"]).resolve())
+            doc_root = (hub_root / ds["root"]).resolve()
+            r["doc_root"] = doc_root.as_posix()
+            r["abs_path"] = (doc_root / r["rel_path"]).resolve().as_posix()
         all_results.extend(rows)
 
     # 跨 docset 合并后按 score 再排，取 top

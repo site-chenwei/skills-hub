@@ -1,7 +1,7 @@
 interface:
   display_name: "docs-hub"
   short_description: "资料查询默认先走本地 DocsHub，支持初始化与刷新"
-  default_prompt: "Use $docs-hub as the mandatory first step for documentation and factual lookups; query the local DocsHub before answering or falling back to memory/web unless the hub is unavailable, yields no useful result after refinement, or the user explicitly requests online-latest information. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call python3 <skill_root>/run.py ..."
+  default_prompt: "Use $docs-hub as the mandatory first step for documentation and factual lookups; query the local DocsHub before answering or falling back to memory/web unless the hub is unavailable, yields no useful result after refinement, or the user explicitly requests online-latest information. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."
 
 policy:
   allow_implicit_invocation: true

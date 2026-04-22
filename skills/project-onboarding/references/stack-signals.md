@@ -13,8 +13,8 @@
 - 关键文件：`pyproject.toml`、`requirements*.txt`、`uv.lock`、`poetry.lock`
 - 优先补读：`[project]`、`[tool.*]`、`tests/`、入口脚本
 - 常见验证：
-  - `python3 -m pytest`
-  - `python3 -m ruff check .`
+  - `<python_cmd> -m pytest`
+  - `<python_cmd> -m ruff check .`
 
 ## Go
 

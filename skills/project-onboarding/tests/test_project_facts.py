@@ -94,7 +94,7 @@ class ProjectFactsTests(unittest.TestCase):
 
         self.assertIn("python", facts["inferred"]["primary_stacks"])
         commands = {item["command"] for item in facts["inferred"]["validation_commands"]}
-        self.assertIn("python3 -m unittest discover", commands)
+        self.assertIn("<python_cmd> -m unittest discover", commands)
         self.assertEqual(facts["parse_errors"], [])
 
 

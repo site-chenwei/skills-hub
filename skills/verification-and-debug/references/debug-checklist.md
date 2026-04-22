@@ -6,7 +6,7 @@
 - 失败是稳定复现还是偶发？
 - 最近改动过哪些文件、依赖、配置、环境变量？
 - 失败发生在构建、启动、运行时、网络交互还是持久化阶段？
-- 是否已经用 `python3 <skill_root>/run.py capture_failure ...` 固定住失败命令、退出码和日志尾部？
+- 是否已经用 `<python_cmd> <skill_root>/run.py capture_failure ...` 固定住失败命令、退出码和日志尾部？
 
 ## 观察与定位
 

@@ -19,6 +19,7 @@ MANAGED_SKILL_ENTRIES = ["SKILL.md", "agents", "references", "requirements-build
 BUILD_SCRIPT = SKILL_ROOT / "scripts" / "build_docset_index.py"
 SEARCH_SCRIPT = SKILL_ROOT / "scripts" / "search_docs.py"
 INIT_SCRIPT = SKILL_ROOT / "scripts" / "local_doc_init.py"
+PYTHON = sys.executable
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from _common import DependencyMissingError, parse_front_matter  # noqa: E402
@@ -124,7 +125,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             encoding="utf-8",
         )
         subprocess.run(
-            ["python3", str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(cls.shared_hub_root)],
+            [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(cls.shared_hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -182,7 +183,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
 
     def run_build(self, hub_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "testset", *args],
+            [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "testset", *args],
             check=True,
             capture_output=True,
             text=True,
@@ -190,7 +191,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
 
     def run_search(self, hub_root: Path, *args: str) -> list[dict]:
         proc = subprocess.run(
-            ["python3", str(SEARCH_SCRIPT), "--hub-root", str(hub_root), *args, "--json"],
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), *args, "--json"],
             check=True,
             capture_output=True,
             text=True,
@@ -226,7 +227,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         )
         self.run_build(hub_root)
         proc = subprocess.run(
-            ["python3", str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "hello", "--docset", "testset", "--json"],
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "hello", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,
             text=True,
@@ -917,7 +918,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
         subprocess.run(
-            ["python3", str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
+            [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
             check=True,
             capture_output=True,
             text=True,
@@ -934,7 +935,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         proc = subprocess.run(
-            ["python3", str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT)],
+            [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT)],
             check=False,
             cwd=tmpdir.name,
             capture_output=True,
@@ -950,7 +951,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         invalid_root.mkdir(parents=True, exist_ok=True)
         valid_hub = self.make_hub()
         proc = subprocess.run(
-            ["python3", str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(invalid_root)],
+            [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(invalid_root)],
             check=False,
             capture_output=True,
             text=True,
@@ -982,7 +983,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             """,
         )
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1020,7 +1021,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         )
 
         proc = subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=False,
             capture_output=True,
             text=True,
@@ -1041,7 +1042,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         hub_root = self.make_hub()
         subprocess.run(
             [
-                "python3",
+                PYTHON,
                 str(isolated_skill_root / "scripts" / "local_doc_init.py"),
                 "--skill-root",
                 str(isolated_skill_root),
@@ -1064,7 +1065,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         hub_root = self.make_hub()
 
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1073,7 +1074,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         sentinel.write_text("reuse me\n", encoding="utf-8")
 
         proc = subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1113,7 +1114,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         expected_signature = compute_build_signature(merge_config(cfg["defaults"], cfg["docsets"][0]))
 
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1152,7 +1153,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             encoding="utf-8",
         )
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(workspace_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(workspace_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1170,7 +1171,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             init_state.unlink()
         hub_root = self.make_hub()
         proc = subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "search_docs.py"), "--hub-root", str(hub_root), "输入法"],
+            [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "--hub-root", str(hub_root), "输入法"],
             check=False,
             capture_output=True,
             text=True,
@@ -1201,13 +1202,13 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             """,
         )
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
         )
         proc = subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "search_docs.py"), "reusable", "--docset", "testset", "--json"],
+            [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "reusable", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,
             text=True,
@@ -1239,7 +1240,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             """,
         )
         subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
@@ -1262,7 +1263,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             encoding="utf-8",
         )
         proc = subprocess.run(
-            ["python3", str(isolated_skill_root / "scripts" / "search_docs.py"), "--rebuild-stale", "refreshed", "--docset", "testset", "--json"],
+            [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "--rebuild-stale", "refreshed", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,
             text=True,

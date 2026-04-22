@@ -14,7 +14,8 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
 ## 运行约定
 
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
-- Python 入口统一通过 `python3 <skill_root>/run.py ...` 或 `python <skill_root>/run.py ...` 调用，不要手拼 `scripts/harmony_build.py` 的绝对路径。
+- Python 入口统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/harmony_build.py` 的绝对路径。
+- 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 - 仅在明确需要 PowerShell 包装时，才直接使用 `.\scripts\harmony_build.ps1`。
 
 ## 何时使用
@@ -58,8 +59,7 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 如果仓库无法解析到 Windows 驱动器路径，不要给出最终 Windows 构建结论。
 2. 首次建立或显式刷新环境基线。
    - 示例：
-     - `python3 <skill_root>/run.py detect --repo <repo-wsl-path>`
-     - `python <skill_root>/run.py detect --repo <repo-windows-path>`
+     - `<python_cmd> <skill_root>/run.py detect --repo <repo-path>`
      - `.\scripts\harmony_build.ps1 detect --repo <repo-windows-path>`
    - 默认情况下，`detect` 会探测 SDK 候选根，并用 `hvigorw.bat tasks` 做一次 preflight；ready 时会把结果保存成该仓库的缓存基线。
    - 后续再次执行 `detect` 时，若该仓库已有可用 ready baseline，会直接复用缓存并快速返回。
@@ -85,8 +85,7 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 如果你已知更小任务名，就直接跑它；如果没有，就直接跑当前最小可证明任务，而不是先做 task 探测。
    - 只有在用户明确需要 App 级产物、安装包，或改动明显影响 App 聚合打包链路时，才使用 `assembleApp`。
    - 示例：
-     - `python3 <skill_root>/run.py verify --repo <repo-wsl-path> --task <task>`
-     - `python <skill_root>/run.py verify --repo <repo-windows-path> --task <task>`
+     - `<python_cmd> <skill_root>/run.py verify --repo <repo-path> --task <task>`
      - `.\scripts\harmony_build.ps1 verify --repo <repo-windows-path> --task <task>`
 7. 明确说明结论来源：
    - 是来自 Windows 侧 `hvigorw.bat` 实际验证

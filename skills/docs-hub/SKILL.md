@@ -10,7 +10,8 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 ## Runner Convention
 
 - Set `<skill_root>` to the directory containing the `SKILL.md` file you opened for this skill.
-- Invoke bundled helpers through `python3 <skill_root>/run.py ...`; do not hand-write `scripts/*.py` install paths or guess whether the skill lives under `.system/`.
+- Invoke bundled helpers through `<python_cmd> <skill_root>/run.py ...`; do not hand-write `scripts/*.py` install paths or guess whether the skill lives under `.system/`.
+- `<python_cmd>` means the available Python launcher in the current environment. On Windows/PowerShell prefer `py -3`, then `python`, then `python3`; on Unix prefer `python3`, then `python`.
 
 ## Priority Rule
 
@@ -54,10 +55,10 @@ Use this skill as the default retrieval gateway for documentation and factual/re
    - otherwise use current workspace / ancestor directories
    If none work, stop and report an error.
 3. For `init`, run:
-   - `python3 <skill_root>/run.py init --hub-root <hub_root>`
+   - `<python_cmd> <skill_root>/run.py init --hub-root <hub_root>`
    Then stop after reporting success/failure.
 4. Otherwise, for every documentation or factual/reference query, run the bundled search script first:
-   - `python3 <skill_root>/run.py search --hub-root <hub_root> <keywords> --top 8`
+   - `<python_cmd> <skill_root>/run.py search --hub-root <hub_root> <keywords> --top 8`
 5. Search first, then open the top 1-3 matched files via the returned `abs_path` and answer from evidence.
 6. Only if the local hub has no useful match after reasonable query refinement, or the user explicitly requires online-latest information, then fall back to other lookup methods.
 7. If the user explicitly asks for `refresh`, use `--rebuild-stale`.
@@ -86,9 +87,9 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 
 - Only run `refresh` or `reinit` when the user explicitly uses those intents.
 - Prefer query-scoped `refresh` first:
-  - `python3 <skill_root>/run.py refresh --hub-root <hub_root> <keywords> --top 8`
+  - `<python_cmd> <skill_root>/run.py refresh --hub-root <hub_root> <keywords> --top 8`
 - Use `reinit` only when the index is missing, corrupted, or the user explicitly asks for a docset-wide rebuild:
-  - `python3 <skill_root>/run.py reinit --hub-root <hub_root> --docset <id>`
+  - `<python_cmd> <skill_root>/run.py reinit --hub-root <hub_root> --docset <id>`
 
 ## Answering rules
 

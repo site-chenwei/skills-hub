@@ -44,18 +44,20 @@ Minimal shape:
 
 ## Commands
 
+`<python_cmd>` means the available Python launcher in the current environment. On Windows/PowerShell prefer `py -3`, then `python`, then `python3`; on Unix prefer `python3`, then `python`.
+
 Read-only search:
 
 ```bash
-python3 <skill_root>/run.py search --hub-root <hub_root> 输入法 --top 8
-python3 <skill_root>/run.py search --hub-root <hub_root> 光标 跟随 --match all --docset harmonyos --top 5
+<python_cmd> <skill_root>/run.py search --hub-root <hub_root> 输入法 --top 8
+<python_cmd> <skill_root>/run.py search --hub-root <hub_root> 光标 跟随 --match all --docset harmonyos --top 5
 ```
 
 Refresh only on explicit user request:
 
 ```bash
-python3 <skill_root>/run.py refresh --hub-root <hub_root> 输入法 --top 8
-python3 <skill_root>/run.py reinit --hub-root <hub_root> --docset harmonyos
+<python_cmd> <skill_root>/run.py refresh --hub-root <hub_root> 输入法 --top 8
+<python_cmd> <skill_root>/run.py reinit --hub-root <hub_root> --docset harmonyos
 ```
 
 ## Notes

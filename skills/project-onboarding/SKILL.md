@@ -10,7 +10,8 @@ description: Use this skill when entering an unfamiliar repository, before cross
 ## 运行约定
 
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
-- 所有辅助脚本统一通过 `python3 <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径，也不要假设 Skill 一定位于 `~/.codex/skills/.system/` 下。
+- 所有辅助脚本统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径，也不要假设 Skill 一定位于 `~/.codex/skills/.system/` 下。
+- 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 
 ## 何时使用
 
@@ -24,7 +25,7 @@ description: Use this skill when entering an unfamiliar repository, before cross
 ## 工作流
 
 1. 先跑事实扫描。
-   - 优先执行 `python3 <skill_root>/run.py project_facts --repo <repo> --format markdown`
+   - 优先执行 `<python_cmd> <skill_root>/run.py project_facts --repo <repo> --format markdown`
    - 用它先拿到文档入口、技术栈信号、顶层目录、验证命令候选和待确认项。
 2. 再读关键入口。
    - 默认顺序是 `PROJECT.md` -> `README*` -> 顶层配置文件 -> `docs/` -> 关键入口源码与测试。
