@@ -6,7 +6,6 @@ import argparse
 import importlib
 from importlib import metadata as importlib_metadata
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -19,13 +18,16 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _bootstrap import (  # noqa: E402
-    INIT_STATE_FILE,
     REQUIREMENTS_FILE,
     format_python_command,
+    init_state_path,
     load_init_state,
     requirements_hash,
     resolve_init_hub_root,
+    runtime_root,
+    site_packages_path,
     skill_root,
+    write_json_atomic,
 )
 
 
@@ -33,7 +35,7 @@ _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 
 
 def deps_site_packages(root: Path) -> Path:
-    return root / ".deps" / "site-packages"
+    return site_packages_path(root)
 
 
 def install_requirements(site_packages: Path, req_path: Path) -> str:
@@ -208,19 +210,6 @@ def build_required_indexes(hub_root: Path, defaults: dict[str, Any], actions: li
         print(f"  stats: {stats}")
 
 
-def write_init_state_atomic(state_path: Path, state: dict[str, Any]) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f"{state_path.name}.", suffix=".tmp", dir=state_path.parent)
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-        os.replace(tmp_path, state_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skill-root", default=None, help="skill 根目录；默认按当前脚本位置推断")
@@ -229,6 +218,7 @@ def main() -> None:
     args = ap.parse_args()
 
     root = Path(args.skill_root).resolve() if args.skill_root else skill_root()
+    runtime_dir = runtime_root(root)
     hub_root = resolve_init_hub_root(args.hub_root)
     req_path = root / REQUIREMENTS_FILE
     if not req_path.exists():
@@ -239,8 +229,8 @@ def main() -> None:
         site_packages, installer = reused
         print(f"[init] 复用已有 skill 依赖: {site_packages}")
     else:
-        print(f"[init] 安装 skill 依赖到本地目录: {deps_site_packages(root)}")
-        site_packages, installer = install_requirements_atomic(root, req_path)
+        print(f"[init] 安装 skill 依赖到本地 runtime 目录: {deps_site_packages(runtime_dir)}")
+        site_packages, installer = install_requirements_atomic(runtime_dir, req_path)
     activate_site_packages(site_packages)
 
     build_module = load_build_module()
@@ -253,12 +243,13 @@ def main() -> None:
         "installer_python": sys.executable,
         "site_packages": str(site_packages),
         "hub_root": str(hub_root),
+        "runtime_root": str(runtime_dir),
         "requirements_file": REQUIREMENTS_FILE,
         "requirements_hash": requirements_hash(root),
         "python_version": ".".join(str(part) for part in sys.version_info[:3]),
     }
-    state_path = root / INIT_STATE_FILE
-    write_init_state_atomic(state_path, state)
+    state_path = init_state_path(root)
+    write_json_atomic(state_path, state)
     print(f"[init] 完成: {state_path}")
     print(f"[init] 已记录 DocsHub 根目录: {hub_root}")
     print(f"[init] 后续可直接运行: {format_python_command(root / 'run.py', 'search', '<keywords>')}")

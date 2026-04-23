@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
-BUILD_LOGIC_VERSION = "8"
+BUILD_LOGIC_VERSION = "9"
 
 VACUUM_MIN_FREE_PAGES = 1024
 VACUUM_FREE_PAGE_RATIO = 0.2
@@ -102,6 +102,11 @@ class DocumentSnapshot:
     mtime_ns: int
     ctime_ns: int
     size: int
+
+
+def supports_fast_stat_skip() -> bool:
+    """Windows 上 st_ctime 是 creation time，不能作为同尺寸覆盖写的变更信号。"""
+    return os.name != "nt"
 
 
 def compile_pathspec(patterns: list[str]):
@@ -369,12 +374,14 @@ def build_docset(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any
 
         prev = snapshot.get(rel)
         prev_id = prev.doc_id if prev else None
-        # stat 完全一致时可直接跳过；保留 mtime 的覆盖写入仍会更新 ctime，从而落回哈希校验。
+        # 非 Windows 平台上，stat 完全一致时可直接跳过；Windows 上 st_ctime 不是可靠的变更时间，
+        # 同尺寸覆盖写 + 保持 mtime 时必须回退到哈希校验，避免误判为未变更。
         if (
             prev
             and not force_reindex
             and prev.size == st.st_size
             and prev.mtime_ns == mtime_ns
+            and supports_fast_stat_skip()
             and prev.ctime_ns == ctime_ns
         ):
             stats["skipped_fast"] += 1

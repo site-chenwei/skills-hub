@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ DEFAULT_DEVECO_SDK_HOME = r"C:\Program Files\Huawei\DevEco Studio\sdk"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 WSL_MOUNT_RE = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
 CACHE_SCHEMA_VERSION = 1
+SKILL_RUNTIME_ROOT_ENV = "SKILLS_HUB_RUNTIME_DIR"
+SKILL_CACHE_DIR_NAME = "harmony-build"
 ENV_FAILURE_MARKERS = (
     "NODE_HOME is not set and no 'node' command could be found in your PATH",
     "Invalid value of 'DEVECO_SDK_HOME' in the system environment path",
@@ -176,11 +179,26 @@ def now_iso_utc() -> str:
 
 
 def cache_root_dir() -> Path:
+    shared_root = os.environ.get(SKILL_RUNTIME_ROOT_ENV)
+    if shared_root:
+        return (Path(shared_root).expanduser().resolve() / SKILL_CACHE_DIR_NAME).resolve()
+
     if RUNTIME == "windows":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
         base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "codex" / "harmony-build"
+    return Path(base) / "skills-hub" / SKILL_CACHE_DIR_NAME
+
+
+def legacy_cache_root_dir() -> Path | None:
+    if os.environ.get(SKILL_RUNTIME_ROOT_ENV):
+        return None
+
+    if RUNTIME == "windows":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "codex" / SKILL_CACHE_DIR_NAME
 
 
 def repo_identity(repo_info: dict) -> str:
@@ -196,6 +214,26 @@ def repo_identity(repo_info: dict) -> str:
 def cache_file_for_repo(repo_info: dict) -> Path:
     repo_hash = hashlib.sha256(repo_identity(repo_info).encode("utf-8")).hexdigest()[:16]
     return cache_root_dir() / f"{repo_hash}.json"
+
+
+def legacy_cache_file_for_repo(repo_info: dict) -> Path | None:
+    legacy_root = legacy_cache_root_dir()
+    if legacy_root is None:
+        return None
+    repo_hash = hashlib.sha256(repo_identity(repo_info).encode("utf-8")).hexdigest()[:16]
+    return legacy_root / f"{repo_hash}.json"
+
+
+def migrate_legacy_cache_file(repo_info: dict, cache_path: Path) -> None:
+    if cache_path.exists():
+        return
+
+    legacy_path = legacy_cache_file_for_repo(repo_info)
+    if legacy_path is None or not legacy_path.exists():
+        return
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(legacy_path, cache_path)
 
 
 def build_cache_metadata(
@@ -254,6 +292,7 @@ def is_cached_detection_usable(result: dict | None, repo_info: dict) -> tuple[bo
 
 def load_cached_detection(repo_info: dict) -> tuple[dict | None, dict]:
     cache_path = cache_file_for_repo(repo_info)
+    migrate_legacy_cache_file(repo_info, cache_path)
     if not cache_path.exists():
         return None, build_cache_metadata(cache_path, "miss", saved=False)
 

@@ -65,6 +65,7 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
    - 后续再次执行 `detect` 时，若该仓库已有可用 ready baseline，会直接复用缓存并快速返回。
    - 只有在你明确传了 `--refresh` 时，`detect` 才会忽略缓存、重跑完整探测。
    - 只有在你明确传了 `--skip-sdk-probe` 时，`detect` 才不会执行 preflight；这种静态探测不会刷新缓存基线。
+   - 缓存目录统一遵循 `skills-hub/<skill-name>` 约定；可用 `SKILLS_HUB_RUNTIME_DIR` 覆盖共享根目录。
 3. 如果第 2 步已经得到 ready baseline，后续同仓库工作流默认直接认定环境 OK。
    - `verify` 和 `print-env` 默认先复用该基线，不必手动再跑一次 `detect`。
    - 仅在以下场景加 `--refresh`：

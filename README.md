@@ -24,6 +24,18 @@
 
 所有 Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 Skill 根目录暴露统一的 `run.py` 入口。调用时先取当前已打开 `SKILL.md` 的所在目录作为 `<skill_root>`，再执行 `<python_cmd> <skill_root>/run.py ...`，不要手拼 `scripts/*.py` 的安装绝对路径。其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 
+## 运行态目录约定
+
+带本地缓存、初始化状态或运行时依赖的 Skill，统一使用用户级外置目录：
+
+- Windows：`%LOCALAPPDATA%\skills-hub\<skill-name>`
+- Linux / macOS：`$XDG_CACHE_HOME/skills-hub/<skill-name>`，未设置时回退到 `~/.cache/skills-hub/<skill-name>`
+
+统一覆盖入口：
+
+- `SKILLS_HUB_RUNTIME_DIR`
+  作为 `skills-hub` 的共享根目录；各 Skill 会在其下追加自己的 `<skill-name>` 子目录。
+
 ## 使用 CC Switch 安装
 
 在 `Skills -> Repository Management -> Add Repository` 中添加自定义仓库：

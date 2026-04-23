@@ -22,12 +22,60 @@ INIT_SCRIPT = SKILL_ROOT / "scripts" / "local_doc_init.py"
 PYTHON = sys.executable
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+from _bootstrap import runtime_root  # noqa: E402
 from _common import DependencyMissingError, parse_front_matter  # noqa: E402
 from build_docset_index import compute_build_signature, maybe_vacuum, merge_config  # noqa: E402
 
 
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def run_subprocess(*args, **kwargs):
+    kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "replace")
+    return _REAL_SUBPROCESS_RUN(*args, **kwargs)
+
+
+subprocess.run = run_subprocess
+
+
+def copy_skill_tree(src: Path, dst: Path) -> None:
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".deps", ".skill-init.json"))
+
+
+class DocsHubRuntimeMixin:
+    def setUp(self) -> None:
+        super().setUp()
+        runtime_tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_tmpdir.cleanup)
+        self.runtime_base = Path(runtime_tmpdir.name)
+        self.runtime_root = self.runtime_base / "docs-hub"
+        self.subprocess_env = {
+            **dict(os.environ),
+            "SKILLS_HUB_RUNTIME_DIR": str(self.runtime_base),
+        }
+
+    def runtime_path(self, *parts: str) -> Path:
+        return self.runtime_root.joinpath(*parts)
+
+    def env_with(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        env = dict(self.subprocess_env)
+        if extra:
+            env.update(extra)
+        return env
+
+
 class DocsHubCommonTest(unittest.TestCase):
+    def test_runtime_root_supports_shared_skills_hub_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"SKILLS_HUB_RUNTIME_DIR": temp_dir}, clear=False):
+                self.assertEqual((Path(temp_dir) / "docs-hub").resolve(), runtime_root())
+
     def test_parse_front_matter_preserves_bool_scalar(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not available in test process")
         fm, body = parse_front_matter(
             textwrap.dedent(
                 """
@@ -85,11 +133,14 @@ class DocsHubLayoutTest(unittest.TestCase):
             self.assertTrue((SKILL_ROOT / entry).exists(), entry)
 
 
-class DocsHubSearchSkillTest(unittest.TestCase):
+class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._shared_tmpdir = tempfile.TemporaryDirectory()
         cls.shared_hub_root = Path(cls._shared_tmpdir.name)
+        cls._shared_runtime_tmpdir = tempfile.TemporaryDirectory()
+        cls.shared_runtime_base = Path(cls._shared_runtime_tmpdir.name)
+        cls.shared_runtime_root = cls.shared_runtime_base / "docs-hub"
         (cls.shared_hub_root / "docs" / "bootstrap").mkdir(parents=True, exist_ok=True)
         (cls.shared_hub_root / "index").mkdir(parents=True, exist_ok=True)
         (cls.shared_hub_root / "docsets.json").write_text(
@@ -129,11 +180,38 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env={
+                **dict(os.environ),
+                "SKILLS_HUB_RUNTIME_DIR": str(cls.shared_runtime_base),
+            },
         )
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls._shared_tmpdir.cleanup()
+        cls._shared_runtime_tmpdir.cleanup()
+
+    def setUp(self) -> None:
+        super().setUp()
+        shutil.copytree(self.shared_runtime_root, self.runtime_root, dirs_exist_ok=True)
+        state_path = self.runtime_path(".skill-init.json")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["site_packages"] = str(self.runtime_path(".deps", "site-packages"))
+        state["runtime_root"] = str(self.runtime_root)
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._repo_skill_initialized = True
+
+    def ensure_repo_skill_initialized(self) -> None:
+        if self._repo_skill_initialized:
+            return
+        subprocess.run(
+            [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(self.shared_hub_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+        self._repo_skill_initialized = True
 
     def make_hub(self) -> Path:
         tmpdir = tempfile.TemporaryDirectory()
@@ -182,19 +260,23 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         return path
 
     def run_build(self, hub_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        self.ensure_repo_skill_initialized()
         return subprocess.run(
             [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "testset", *args],
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
     def run_search(self, hub_root: Path, *args: str) -> list[dict]:
+        self.ensure_repo_skill_initialized()
         proc = subprocess.run(
             [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), *args, "--json"],
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         return json.loads(proc.stdout)
 
@@ -208,6 +290,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             conn.close()
 
     def test_explicit_query_hub_root_overrides_saved_init_hub_root(self) -> None:
+        self.ensure_repo_skill_initialized()
         hub_root = self.make_hub()
         self.write_doc(
             hub_root,
@@ -231,6 +314,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         rows = json.loads(proc.stdout)
         self.assertEqual(["root.md"], [row["rel_path"] for row in rows])
@@ -394,11 +478,15 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         )
         first = self.run_build(hub_root)
         self.assertIn("'indexed': 1", first.stdout)
-        # 文件未动，二次 build 应当命中 stat 快路径，不再读文件重算哈希。
+        # 非 Windows 平台命中 stat 快路径；Windows 上会回退到哈希校验，避免同尺寸覆盖写被误判。
         second = self.run_build(hub_root)
         self.assertIn("'indexed': 0", second.stdout)
         self.assertIn("'skipped_unchanged': 1", second.stdout)
-        self.assertIn("'skipped_fast': 1", second.stdout)
+        if os.name == "nt":
+            self.assertIn("'skipped_fast': 0", second.stdout)
+            self.assertIn("'skipped_hash_verified': 1", second.stdout)
+        else:
+            self.assertIn("'skipped_fast': 1", second.stdout)
 
     def test_content_change_with_preserved_mtime_still_reindexes(self) -> None:
         """模拟 cp -p / rsync -t：mtime 被保留但内容变了，必须重建。"""
@@ -894,6 +982,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         self.assertTrue(rows[0]["snippet"].startswith("…"), rows[0]["snippet"])
 
     def test_build_all_rebuilds_all_docsets_and_cleans_wal_sidecars(self) -> None:
+        self.ensure_repo_skill_initialized()
         hub_root = self.make_hub()
         cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
         cfg["docsets"].append({"id": "extraset", "name": "Extra", "root": "docs/extraset"})
@@ -922,6 +1011,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
         self.assertTrue((hub_root / "index" / "testset.sqlite").exists())
@@ -940,6 +1030,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             cwd=tmpdir.name,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         self.assertNotEqual(0, proc.returncode)
         self.assertIn("未找到可用的 DocsHub 根目录", proc.stderr)
@@ -955,7 +1046,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
-            env={"CODEX_DOC_HUB": str(valid_hub), **dict(os.environ)},
+            env=self.env_with({"CODEX_DOC_HUB": str(valid_hub)}),
         )
         self.assertNotEqual(0, proc.returncode)
         self.assertIn("指定路径不是有效的 DocsHub 根目录", proc.stderr)
@@ -964,7 +1055,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
         self.write_doc(
             hub_root,
@@ -987,6 +1078,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         self.assertTrue((hub_root / "index" / "testset.sqlite").exists())
 
@@ -994,8 +1086,8 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
-        init_state = isolated_skill_root / ".skill-init.json"
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
+        init_state = self.runtime_path(".skill-init.json")
         if init_state.exists():
             init_state.unlink()
         hub_root = Path(tmpdir.name) / "hub"
@@ -1025,17 +1117,18 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
         self.assertNotEqual(0, proc.returncode)
-        self.assertFalse((isolated_skill_root / ".skill-init.json").exists())
+        self.assertFalse(self.runtime_path(".skill-init.json").exists())
 
     def test_init_cleans_stale_site_packages_before_reinstall(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
-        stale_file = isolated_skill_root / ".deps" / "site-packages" / "stale_only.py"
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
+        stale_file = self.runtime_path(".deps", "site-packages", "stale_only.py")
         stale_file.parent.mkdir(parents=True, exist_ok=True)
         stale_file.write_text("stale = True\n", encoding="utf-8")
 
@@ -1053,6 +1146,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
         self.assertFalse(stale_file.exists())
@@ -1061,7 +1155,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
 
         subprocess.run(
@@ -1069,8 +1163,9 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
-        sentinel = isolated_skill_root / ".deps" / "site-packages" / "cache-sentinel.txt"
+        sentinel = self.runtime_path(".deps", "site-packages", "cache-sentinel.txt")
         sentinel.write_text("reuse me\n", encoding="utf-8")
 
         proc = subprocess.run(
@@ -1078,6 +1173,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
         self.assertIn("复用已有 skill 依赖", proc.stdout)
@@ -1087,7 +1183,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
         self.write_doc(
             hub_root,
@@ -1118,6 +1214,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
 
         new_signature = self.read_build_signature(hub_root)
@@ -1128,7 +1225,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         workspace_root = Path(tmpdir.name) / "workspace"
         hub_root = workspace_root / "doc-search"
         (hub_root / "docs" / "testset").mkdir(parents=True, exist_ok=True)
@@ -1157,16 +1254,17 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
-        state = json.loads((isolated_skill_root / ".skill-init.json").read_text(encoding="utf-8"))
+        state = json.loads(self.runtime_path(".skill-init.json").read_text(encoding="utf-8"))
         self.assertEqual(str(hub_root.resolve()), state["hub_root"])
 
     def test_missing_skill_init_mentions_doc_hub_init(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
-        init_state = isolated_skill_root / ".skill-init.json"
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
+        init_state = self.runtime_path(".skill-init.json")
         if init_state.exists():
             init_state.unlink()
         hub_root = self.make_hub()
@@ -1175,6 +1273,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         self.assertNotEqual(0, proc.returncode)
         self.assertIn("$docs-hub init", proc.stderr)
@@ -1183,7 +1282,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
         self.write_doc(
             hub_root,
@@ -1206,6 +1305,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         proc = subprocess.run(
             [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "reusable", "--docset", "testset", "--json"],
@@ -1213,6 +1313,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             capture_output=True,
             text=True,
             cwd=tmpdir.name,
+            env=self.subprocess_env,
         )
         rows = json.loads(proc.stdout)
         self.assertEqual(["sub/a.md"], [row["rel_path"] for row in rows])
@@ -1221,7 +1322,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         isolated_skill_root = Path(tmpdir.name) / "docs-hub"
-        shutil.copytree(SKILL_ROOT, isolated_skill_root)
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
         doc_path = self.write_doc(
             hub_root,
@@ -1244,6 +1345,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=self.subprocess_env,
         )
         doc_path.write_text(
             textwrap.dedent(
@@ -1268,6 +1370,7 @@ class DocsHubSearchSkillTest(unittest.TestCase):
             capture_output=True,
             text=True,
             cwd=tmpdir.name,
+            env=self.subprocess_env,
         )
         rows = json.loads(proc.stdout)
         self.assertEqual(["sub/a.md"], [row["rel_path"] for row in rows])

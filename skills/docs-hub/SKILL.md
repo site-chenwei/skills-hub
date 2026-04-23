@@ -24,7 +24,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 ## Invocation Modes
 
 - `$docs-hub init [hub-root]`
-  If `hub-root` is explicitly provided, validate only that directory and fail if it is not a standard DocsHub root. Otherwise resolve from environment/current workspace. Then run the bundled init script, record that hub as the default working directory, cleanly refresh bundled dependencies, and auto-build missing or stale indexes.
+  If `hub-root` is explicitly provided, validate only that directory and fail if it is not a standard DocsHub root. Otherwise resolve from environment/current workspace. Then run the bundled init script, record that hub as the default working directory, refresh the local runtime dependency cache, and auto-build missing or stale indexes.
 - `$docs-hub <query>`
   Search the DocsHub and answer from the matched local files.
 - `$docs-hub refresh <query>`
@@ -69,7 +69,9 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - This skill needs a one-time init after installation.
 - Prefer performing init yourself when the user uses `$docs-hub init ...`.
 - During init, if the DocsHub root resolves successfully, let the script detect missing or stale indexes and auto-build them.
-- Init reuses the bundled local dependency cache when the requirements hash and Python version still match; use `--refresh-deps` only when you explicitly need a clean reinstall.
+- Init reuses the external local runtime cache when the requirements hash and Python version still match; use `--refresh-deps` only when you explicitly need a clean reinstall.
+- Runtime state and bundled dependencies are stored outside the synced skill bundle, so a later cloud sync or skill directory replacement does not normally require another manual `init`.
+- Runtime directory convention follows `skills-hub/<skill-name>` under the user cache root; use `SKILLS_HUB_RUNTIME_DIR` to override the shared root.
 - Query and rebuild prefer the DocsHub root recorded during the last successful init.
 - Explicit `init <hub-root>` is strict: it validates only that directory and does not fall back to env or workspace discovery.
 - If any bundled script says the skill is not initialized during a normal search, tell the user to run `$docs-hub init` in Codex instead of showing raw shell commands first.

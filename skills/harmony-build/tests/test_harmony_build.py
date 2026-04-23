@@ -1,5 +1,6 @@
 import io
 import importlib.util
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -82,6 +83,25 @@ class HarmonyBuildCacheTests(unittest.TestCase):
         self.assertEqual(metadata["source"], "stale")
         self.assertEqual(metadata["invalid_reason"], "missing_deveco_sdk_home")
 
+    def test_load_cached_detection_migrates_legacy_cache_file(self) -> None:
+        legacy_root = Path(self.temp_dir.name) / "legacy-cache"
+        with mock.patch.object(HARMONY_BUILD, "cache_root_dir", return_value=legacy_root):
+            HARMONY_BUILD.save_cached_detection(self.ready_result)
+
+        legacy_cache_file = next(legacy_root.glob("*.json"))
+        self.assertFalse(any(self.cache_root.glob("*.json")))
+
+        with (
+            mock.patch.object(HARMONY_BUILD, "cache_root_dir", return_value=self.cache_root),
+            mock.patch.object(HARMONY_BUILD, "legacy_cache_root_dir", return_value=legacy_root),
+            mock.patch.object(HARMONY_BUILD, "host_path_exists", return_value=True),
+        ):
+            loaded, metadata = HARMONY_BUILD.load_cached_detection(self.repo_info)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(metadata["source"], "cache")
+        self.assertTrue((self.cache_root / legacy_cache_file.name).exists())
+
     def test_resolve_detection_refresh_bypasses_cache(self) -> None:
         with (
             mock.patch.object(HARMONY_BUILD, "resolve_repo_paths", return_value=self.repo_info),
@@ -99,6 +119,13 @@ class HarmonyBuildCacheTests(unittest.TestCase):
         detect_mock.assert_called_once_with(self.repo_info, probe_sdk_roots=True)
         save_mock.assert_called_once()
         self.assertEqual(result["cache"]["source"], "fresh")
+
+    def test_cache_root_dir_uses_shared_skills_hub_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"SKILLS_HUB_RUNTIME_DIR": temp_dir}, clear=False):
+                cache_root = HARMONY_BUILD.cache_root_dir()
+
+        self.assertEqual((Path(temp_dir) / "harmony-build").resolve(), cache_root)
 
 
 class HarmonyBuildRegressionTests(unittest.TestCase):
