@@ -217,15 +217,16 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertIn(sdk_version, candidates)
 
     def test_run_hvigor_task_redirects_output_to_file_not_pipe(self) -> None:
-        def fake_run(args, **kwargs):
+        def fake_popen(args, **kwargs):
             self.assertNotIn("capture_output", kwargs)
             self.assertIsNotNone(kwargs.get("stdout"))
             self.assertEqual(kwargs.get("stderr"), HARMONY_BUILD.subprocess.STDOUT)
-            self.assertEqual(kwargs.get("timeout"), 12)
+            self.assertNotIn("timeout", kwargs)
+            kwargs["stdout"].write(f"{HARMONY_BUILD.POWERSHELL_PID_MARKER}4321\n")
             kwargs["stdout"].write("line before\nBUILD SUCCESSFUL in 1 s\n")
-            return mock.Mock(returncode=0)
+            return mock.Mock(pid=4321, wait=mock.Mock(return_value=0))
 
-        with mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run) as run_mock:
+        with mock.patch.object(HARMONY_BUILD.subprocess, "Popen", side_effect=fake_popen) as popen_mock:
             outcome = HARMONY_BUILD.run_hvigor_task(
                 r"D:\workspace\demo",
                 r"C:\Node",
@@ -235,17 +236,25 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                 timeout_seconds=12,
             )
 
-        run_mock.assert_called_once()
+        popen_mock.assert_called_once()
         self.assertTrue(outcome["success"])
         self.assertEqual(outcome["exit_code"], 0)
         self.assertIn("BUILD SUCCESSFUL", outcome["output"])
+        self.assertNotIn(HARMONY_BUILD.POWERSHELL_PID_MARKER, outcome["output"])
 
-    def test_run_hvigor_task_times_out_with_tail_summary(self) -> None:
-        def fake_run(args, **kwargs):
+    def test_run_hvigor_task_times_out_and_terminates_process_tree(self) -> None:
+        fake_process = mock.Mock(pid=4321)
+        fake_process.wait.side_effect = HARMONY_BUILD.subprocess.TimeoutExpired(cmd=["powershell.exe"], timeout=1)
+
+        def fake_popen(args, **kwargs):
+            kwargs["stdout"].write(f"{HARMONY_BUILD.POWERSHELL_PID_MARKER}9876\n")
             kwargs["stdout"].write("BUILD FAILED in 1 s\n")
-            raise HARMONY_BUILD.subprocess.TimeoutExpired(cmd=args, timeout=1)
+            return fake_process
 
-        with mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run):
+        with (
+            mock.patch.object(HARMONY_BUILD.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(HARMONY_BUILD, "terminate_process_tree", return_value=None) as terminate_mock,
+        ):
             outcome = HARMONY_BUILD.run_hvigor_task(
                 r"D:\workspace\demo",
                 r"C:\Node",
@@ -255,13 +264,15 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                 timeout_seconds=1,
             )
 
+        terminate_mock.assert_called_once_with(fake_process, 9876)
         self.assertFalse(outcome["success"])
         self.assertEqual(outcome["exit_code"], 124)
         self.assertIn("BUILD FAILED", outcome["output"])
         self.assertIn("timed out after 1 seconds", outcome["output"])
+        self.assertNotIn(HARMONY_BUILD.POWERSHELL_PID_MARKER, outcome["output"])
 
     def test_run_hvigor_task_rejects_internal_task_key(self) -> None:
-        with mock.patch.object(HARMONY_BUILD.subprocess, "run") as run_mock:
+        with mock.patch.object(HARMONY_BUILD.subprocess, "Popen") as popen_mock:
             outcome = HARMONY_BUILD.run_hvigor_task(
                 r"D:\workspace\demo",
                 r"C:\Node",
@@ -270,10 +281,27 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                 r":entry:default@CompileArkTS",
             )
 
-        run_mock.assert_not_called()
+        popen_mock.assert_not_called()
         self.assertFalse(outcome["success"])
         self.assertEqual(outcome["exit_code"], 2)
         self.assertIn("not an internal .hvigor task key", outcome["output"])
+
+    def test_terminate_process_tree_uses_windows_taskkill(self) -> None:
+        fake_process = mock.Mock(pid=4321)
+        taskkill_result = mock.Mock(returncode=0)
+
+        with mock.patch.object(HARMONY_BUILD.subprocess, "run", return_value=taskkill_result) as run_mock:
+            cleanup_error = HARMONY_BUILD.terminate_process_tree(fake_process, 9876)
+
+        self.assertIsNone(cleanup_error)
+        run_mock.assert_called_once_with(
+            ["taskkill.exe", "/PID", "9876", "/T", "/F"],
+            stdout=HARMONY_BUILD.subprocess.DEVNULL,
+            stderr=HARMONY_BUILD.subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+        fake_process.wait.assert_called_once_with(timeout=10)
 
 
 if __name__ == "__main__":

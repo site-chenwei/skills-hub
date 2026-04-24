@@ -29,6 +29,7 @@ ENV_FAILURE_MARKERS = (
 HVIGOR_TASK_TIMEOUT_SECONDS = 900
 HVIGOR_OUTPUT_TAIL_LINES = 80
 HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
+POWERSHELL_PID_MARKER = "__SKILLS_HUB_POWERSHELL_PID="
 
 
 def strip_ansi(text: str) -> str:
@@ -389,6 +390,53 @@ def read_file_tail(path: Path, *, max_lines: int = HVIGOR_OUTPUT_TAIL_LINES, max
     return "\n".join(lines[-max_lines:])
 
 
+def read_file_head(path: Path, *, max_bytes: int = 4096) -> str:
+    if not path.exists():
+        return ""
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes)
+    return data.decode("utf-8", errors="replace")
+
+
+def extract_powershell_pid(text: str) -> int | None:
+    match = re.search(rf"^{re.escape(POWERSHELL_PID_MARKER)}(\d+)\s*$", text, re.MULTILINE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def clean_hvigor_output(text: str) -> str:
+    lines = []
+    for line in strip_ansi(text).splitlines():
+        if line.startswith(POWERSHELL_PID_MARKER):
+            continue
+        if line.strip():
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def terminate_process_tree(process: subprocess.Popen, windows_pid: int | None) -> str | None:
+    pid = windows_pid or process.pid
+    try:
+        result = subprocess.run(
+            ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return f"taskkill.exe exited with code {result.returncode}"
+        process.wait(timeout=10)
+        return None
+    except Exception as error:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return f"failed to terminate hvigor process tree: {error}"
+
+
 def gather_windows_env() -> dict:
     script = """
 $result = [ordered]@{
@@ -552,6 +600,7 @@ def run_hvigor_task(
         }
 
     script = f"""
+Write-Output "{POWERSHELL_PID_MARKER}$PID"
 $env:NODE_HOME = {ps_literal(node_home)}
 $env:DEVECO_SDK_HOME = {ps_literal(sdk_home)}
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -561,26 +610,29 @@ exit $LASTEXITCODE
 """
     log_path = None
     timed_out = False
+    cleanup_error = None
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", errors="replace", delete=False) as log_file:
             log_path = Path(log_file.name)
+            process = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-Command", script],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
             try:
-                result = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-Command", script],
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout_seconds,
-                    check=False,
-                )
-                exit_code = result.returncode
+                exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 exit_code = 124
+                log_file.flush()
+                pid_output = "\n".join([read_file_head(log_path), read_file_tail(log_path)])
+                cleanup_error = terminate_process_tree(process, extract_powershell_pid(pid_output))
 
-        output = strip_ansi(read_file_tail(log_path)).strip() if log_path else ""
+            log_file.flush()
+        output = clean_hvigor_output(read_file_tail(log_path)).strip() if log_path else ""
     finally:
         if log_path:
             try:
@@ -591,6 +643,8 @@ exit $LASTEXITCODE
     if timed_out:
         timeout_message = f"hvigor task timed out after {timeout_seconds} seconds."
         output = "\n".join(part for part in [output, timeout_message] if part)
+        if cleanup_error:
+            output = "\n".join([output, cleanup_error])
 
     return {
         "success": exit_code == 0,
