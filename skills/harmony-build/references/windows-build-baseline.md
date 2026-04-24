@@ -1,5 +1,7 @@
 # Windows Build Baseline
 
+> 迁移说明：`harmony-build` 现在以 Mac 本机 HarmonyOS / OpenHarmony 开发验证为主。本文只保留为旧 Windows / WSL 工作流的历史参考；当前 Skill 的默认规则见 `macos-build-baseline.md`。
+
 ## 适用范围
 
 本文件说明 HarmonyOS / OpenHarmony 项目在 WSL 或 Windows 原生环境下进行 Windows 侧构建验证时的环境假设与判定规则。

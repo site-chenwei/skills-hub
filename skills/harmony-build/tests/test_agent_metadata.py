@@ -16,17 +16,17 @@ def read_default_prompt(agent_file: Path) -> str | None:
 
 
 class HarmonyBuildAgentMetadataTests(unittest.TestCase):
-    def test_default_prompt_runs_build_directly_when_verification_is_needed(self) -> None:
+    def test_default_prompt_describes_macos_first_verification(self) -> None:
         prompt = read_default_prompt(AGENT_FILE)
 
         self.assertIsNotNone(prompt)
         assert prompt is not None
         self.assertIn(
-            "when build verification is needed run the chosen public hvigor task directly instead of inserting verify --task tasks first",
+            "macOS HarmonyOS/OpenHarmony development environment",
             prompt,
         )
         self.assertIn(
-            "Use verify --task tasks only when the user explicitly asks for task listing or when you are troubleshooting hvigor or environment drift",
+            "Reuse cached ready baselines",
             prompt,
         )
         self.assertIn(

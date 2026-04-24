@@ -6,30 +6,41 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
-DEFAULT_HVIGOR = r"C:\Program Files\Huawei\DevEco Studio\tools\hvigor\bin\hvigorw.bat"
-DEFAULT_NODE_HOME = r"C:\Program Files\nodejs"
-DEFAULT_DEVECO_SDK_HOME = r"C:\Program Files\Huawei\DevEco Studio\sdk"
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-WSL_MOUNT_RE = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 SKILL_RUNTIME_ROOT_ENV = "SKILLS_HUB_RUNTIME_DIR"
 SKILL_CACHE_DIR_NAME = "harmony-build"
+HVIGOR_TASK_TIMEOUT_SECONDS = 900
+HVIGOR_OUTPUT_TAIL_LINES = 80
+HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
+PROJECT_MARKERS = (
+    "build-profile.json5",
+    "hvigorfile.ts",
+    "hvigorfile.js",
+    "oh-package.json5",
+    "AppScope/app.json5",
+)
+SDK_ENV_KEYS = ("DEVECO_SDK_HOME", "HOS_SDK_HOME", "OHOS_SDK_HOME")
 ENV_FAILURE_MARKERS = (
     "NODE_HOME is not set and no 'node' command could be found in your PATH",
     "Invalid value of 'DEVECO_SDK_HOME' in the system environment path",
     "SDK component missing",
+    "Cannot find module",
+    "command not found",
+    "Permission denied",
+    "not executable",
 )
-HVIGOR_TASK_TIMEOUT_SECONDS = 900
-HVIGOR_OUTPUT_TAIL_LINES = 80
-HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
-POWERSHELL_PID_MARKER = "__SKILLS_HUB_POWERSHELL_PID="
 
 
 def strip_ansi(text: str) -> str:
@@ -37,6 +48,9 @@ def strip_ansi(text: str) -> str:
 
 
 def detect_runtime() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macos"
     if os.name == "nt":
         return "windows"
     release = platform.uname().release.lower()
@@ -48,130 +62,13 @@ def detect_runtime() -> str:
 RUNTIME = detect_runtime()
 
 
-def is_windows_path(path_text: str) -> bool:
-    return bool(re.match(r"^[A-Za-z]:[\\/]", path_text.strip()))
-
-
-def is_wsl_mounted_windows_path(path_text: str) -> bool:
-    normalized = path_text.replace("\\", "/").strip()
-    return bool(WSL_MOUNT_RE.match(normalized))
-
-
-def normalize_windows_path(path_text: str) -> str:
-    value = path_text.strip().replace("/", "\\")
-    drive_root = re.match(r"^([A-Za-z]):\\?$", value)
-    if drive_root:
-        return f"{drive_root.group(1).upper()}:\\"
-    value = value.rstrip("\\/")
-    return value
-
-
-def wsl_to_windows_path(path_text: str) -> str:
-    normalized = str(path_text).replace("\\", "/")
-    if not normalized.startswith("/mnt/"):
-        normalized = str(Path(path_text).resolve()).replace("\\", "/")
-    match = WSL_MOUNT_RE.match(normalized)
-    if not match:
-        raise ValueError(f"Path is not on a mounted Windows drive: {path_text}")
-    drive = match.group(1).upper()
-    remainder = match.group(2) or ""
-    if not remainder:
-        return f"{drive}:\\"
-    return f"{drive}:\\{remainder.replace('/', '\\')}"
-
-
-def windows_to_wsl_path(path_text: str) -> str:
-    value = normalize_windows_path(path_text)
-    match = re.match(r"^([A-Za-z]):\\?(.*)$", value)
-    if not match:
-        raise ValueError(f"Not a Windows path: {path_text}")
-    drive = match.group(1).lower()
-    remainder = match.group(2)
-    if not remainder:
-        return f"/mnt/{drive}"
-    return f"/mnt/{drive}/{remainder.replace('\\', '/')}"
-
-
-def resolve_host_path(path_text: str) -> Path | None:
-    if not path_text:
-        return None
-    if is_windows_path(path_text):
-        normalized = normalize_windows_path(path_text)
-        if RUNTIME == "windows":
-            return Path(normalized)
-        if RUNTIME == "wsl":
-            try:
-                return Path(windows_to_wsl_path(normalized))
-            except ValueError:
-                return None
-        return None
-    return Path(path_text)
-
-
-def host_path_exists(path_text: str) -> bool:
-    host_path = resolve_host_path(path_text)
-    return bool(host_path and host_path.exists())
-
-
-def host_dir_children(path_text: str) -> list[str]:
-    host_path = resolve_host_path(path_text)
-    if host_path is None or not host_path.exists() or not host_path.is_dir():
-        return []
-
-    children = []
-    for child in sorted(host_path.iterdir()):
-        if not child.is_dir():
-            continue
-        if is_windows_path(path_text):
-            if RUNTIME == "windows":
-                children.append(normalize_windows_path(str(child)))
-            elif RUNTIME == "wsl":
-                children.append(wsl_to_windows_path(str(child)))
-            continue
-        children.append(str(child))
-    return children
-
-
-def ps_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def run_powershell(script: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-
-
-def parse_json_output(result: subprocess.CompletedProcess) -> dict:
-    if result.returncode != 0:
-        stderr = strip_ansi(result.stderr).strip()
-        stdout = strip_ansi(result.stdout).strip()
-        raise RuntimeError(stderr or stdout or "PowerShell command failed")
-    payload = result.stdout.strip()
-    if not payload:
-        return {}
-    return json.loads(payload)
-
-
-def ensure_list(value):
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
 def unique_values(values):
     seen = set()
     result = []
     for item in values:
-        if not item:
+        if item is None:
             continue
-        normalized = item.strip()
+        normalized = str(item).strip()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
@@ -188,32 +85,37 @@ def cache_root_dir() -> Path:
     if shared_root:
         return (Path(shared_root).expanduser().resolve() / SKILL_CACHE_DIR_NAME).resolve()
 
-    if RUNTIME == "windows":
+    if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
         base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "skills-hub" / SKILL_CACHE_DIR_NAME
+    return (Path(base) / "skills-hub" / SKILL_CACHE_DIR_NAME).resolve()
 
 
 def legacy_cache_root_dir() -> Path | None:
     if os.environ.get(SKILL_RUNTIME_ROOT_ENV):
         return None
 
-    if RUNTIME == "windows":
+    if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
         base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(base) / "codex" / SKILL_CACHE_DIR_NAME
 
 
+def resolve_repo_paths(repo_arg: str | None) -> dict:
+    repo_input = repo_arg or os.getcwd()
+    repo_local = Path(repo_input).expanduser().resolve()
+    return {
+        "input": repo_input,
+        "local_path": str(repo_local),
+        "local_exists": repo_local.exists(),
+    }
+
+
 def repo_identity(repo_info: dict) -> str:
-    for candidate in [repo_info.get("windows_path"), repo_info.get("local_path"), repo_info.get("input")]:
-        if not candidate:
-            continue
-        if is_windows_path(candidate):
-            return normalize_windows_path(candidate)
-        return str(Path(candidate).resolve())
-    return "unknown-repo"
+    candidate = repo_info.get("local_path") or repo_info.get("input") or "unknown-repo"
+    return str(Path(candidate).expanduser().resolve())
 
 
 def cache_file_for_repo(repo_info: dict) -> Path:
@@ -268,9 +170,25 @@ def strip_cache_metadata(result: dict) -> dict:
     return payload
 
 
+def host_path_exists(path_text: str | None) -> bool:
+    if not path_text:
+        return False
+    return Path(path_text).expanduser().exists()
+
+
+def is_executable_file(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if os.name == "nt":
+        return True
+    return os.access(path, os.X_OK)
+
+
 def is_cached_detection_usable(result: dict | None, repo_info: dict) -> tuple[bool, str | None]:
     if not isinstance(result, dict):
         return False, "invalid_payload"
+    if result.get("version") not in (None, CACHE_SCHEMA_VERSION):
+        return False, "schema_mismatch"
 
     cached_repo = result.get("repo") or {}
     resolved = result.get("resolved") or {}
@@ -278,20 +196,19 @@ def is_cached_detection_usable(result: dict | None, repo_info: dict) -> tuple[bo
         return False, "repo_mismatch"
     if not result.get("ready"):
         return False, "not_ready"
-    if not cached_repo.get("windows_compatible"):
-        return False, "repo_not_windows_compatible"
 
     checks = [
         ("repo_local_path", cached_repo.get("local_path")),
-        ("repo_windows_path", cached_repo.get("windows_path")),
-        ("node_home", resolved.get("node_home")),
         ("node_path", resolved.get("node_path")),
-        ("deveco_sdk_home", resolved.get("deveco_sdk_home")),
-        ("hvigorw_path", resolved.get("hvigorw_path")),
+        ("sdk_home", resolved.get("sdk_home")),
+        ("hvigor_path", resolved.get("hvigor_path")),
     ]
     for label, path_text in checks:
-        if not path_text or not host_path_exists(path_text):
+        if not host_path_exists(path_text):
             return False, f"missing_{label}"
+
+    if not (result.get("preflight") or {}).get("success"):
+        return False, "missing_ready_preflight"
     return True, None
 
 
@@ -354,8 +271,191 @@ def save_cached_detection(result: dict) -> dict:
     return build_cache_metadata(cache_path, "fresh", saved=True, saved_at=saved_at)
 
 
-def looks_like_environment_failure(output: str) -> bool:
-    return any(marker in output for marker in ENV_FAILURE_MARKERS)
+def which_all(command_name: str) -> list[str]:
+    found = []
+    first = shutil.which(command_name)
+    if first:
+        found.append(str(Path(first).resolve()))
+
+    path_parts = os.environ.get("PATH", "").split(os.pathsep)
+    executable_names = [command_name]
+    if os.name == "nt" and not Path(command_name).suffix:
+        executable_names.extend(f"{command_name}{ext.lower()}" for ext in os.environ.get("PATHEXT", ".EXE;.BAT;.CMD").split(";"))
+
+    for raw_dir in path_parts:
+        if not raw_dir:
+            continue
+        base = Path(raw_dir).expanduser()
+        for name in executable_names:
+            candidate = base / name
+            if is_executable_file(candidate):
+                found.append(str(candidate.resolve()))
+    return unique_values(found)
+
+
+def candidate_deveco_apps() -> list[str]:
+    candidates = [
+        Path("/Applications/DevEco-Studio.app"),
+        Path("/Applications/DevEco Studio.app"),
+        Path.home() / "Applications" / "DevEco-Studio.app",
+        Path.home() / "Applications" / "DevEco Studio.app",
+    ]
+    for base in [Path("/Applications"), Path.home() / "Applications"]:
+        if base.exists():
+            candidates.extend(sorted(base.glob("DevEco*.app")))
+    return unique_values(str(path.resolve()) for path in candidates if path.exists())
+
+
+def detect_project_markers(repo: Path) -> list[str]:
+    markers = []
+    if not repo.exists() or not repo.is_dir():
+        return markers
+    for marker in PROJECT_MARKERS:
+        if (repo / marker).exists():
+            markers.append(marker)
+    return markers
+
+
+def candidate_node_paths() -> list[str]:
+    candidates = []
+    node_home = os.environ.get("NODE_HOME")
+    if node_home:
+        root = Path(node_home).expanduser()
+        candidates.extend([root / "bin" / "node", root / "node"])
+    candidates.extend(Path(path) for path in which_all("node"))
+    candidates.extend(
+        [
+            Path("/opt/homebrew/bin/node"),
+            Path("/usr/local/bin/node"),
+            Path("/usr/bin/node"),
+        ]
+    )
+    return unique_values(str(path.resolve()) for path in candidates if path.exists())
+
+
+def node_home_from_path(node_path: str | None) -> str | None:
+    if not node_path:
+        return None
+    path = Path(node_path)
+    if path.parent.name == "bin":
+        return str(path.parent.parent)
+    return str(path.parent)
+
+
+def resolve_node() -> tuple[str | None, str | None, list[str]]:
+    candidates = candidate_node_paths()
+    node_path = next((item for item in candidates if is_executable_file(Path(item))), None)
+    return node_home_from_path(node_path), node_path, candidates
+
+
+def candidate_java_paths() -> list[str]:
+    candidates = []
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home:
+        candidates.append(Path(java_home).expanduser() / "bin" / "java")
+    candidates.extend(Path(path) for path in which_all("java"))
+    candidates.append(Path("/usr/bin/java"))
+    return unique_values(str(path.resolve()) for path in candidates if path.exists())
+
+
+def java_home_from_path(java_path: str | None) -> str | None:
+    if not java_path:
+        return os.environ.get("JAVA_HOME")
+    path = Path(java_path)
+    if path.parent.name == "bin":
+        return str(path.parent.parent)
+    return os.environ.get("JAVA_HOME")
+
+
+def resolve_java() -> tuple[str | None, str | None, list[str]]:
+    candidates = candidate_java_paths()
+    java_path = next((item for item in candidates if is_executable_file(Path(item))), None)
+    return java_home_from_path(java_path), java_path, candidates
+
+
+def looks_like_sdk_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    marker_dirs = {"ets", "js", "native", "toolchains", "kits", "api"}
+    child_names = {child.name for child in path.iterdir() if child.is_dir()}
+    return bool(marker_dirs & child_names)
+
+
+def candidate_sdk_roots() -> list[str]:
+    candidates = []
+    for key in SDK_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value).expanduser())
+
+    home = Path.home()
+    candidates.extend(
+        [
+            home / "Library" / "OpenHarmony" / "Sdk",
+            home / "Library" / "Huawei" / "Sdk",
+            home / "Library" / "Application Support" / "Huawei" / "DevEcoStudio" / "Sdk",
+            home / "Library" / "Application Support" / "Huawei" / "DevEco Studio" / "Sdk",
+        ]
+    )
+    for app_text in candidate_deveco_apps():
+        app = Path(app_text)
+        candidates.extend(
+            [
+                app / "Contents" / "sdk",
+                app / "Contents" / "Sdk",
+            ]
+        )
+
+    expanded = []
+    for candidate in unique_values(str(path.resolve()) for path in candidates if path.exists()):
+        path = Path(candidate)
+        if looks_like_sdk_root(path):
+            expanded.append(str(path))
+        if path.is_dir():
+            for child in sorted(path.iterdir()):
+                if child.is_dir() and looks_like_sdk_root(child):
+                    expanded.append(str(child.resolve()))
+    return unique_values(expanded)
+
+
+def resolve_sdk_root() -> tuple[str | None, list[str]]:
+    candidates = candidate_sdk_roots()
+    return (candidates[0] if candidates else None), candidates
+
+
+def candidate_hvigor_paths(repo: Path) -> list[str]:
+    candidates = [
+        repo / "hvigorw",
+        repo / "hvigor",
+    ]
+    candidates.extend(Path(path) for path in which_all("hvigorw"))
+    candidates.extend(Path(path) for path in which_all("hvigor"))
+
+    for app_text in candidate_deveco_apps():
+        app = Path(app_text)
+        candidates.extend(
+            [
+                app / "Contents" / "tools" / "hvigor" / "bin" / "hvigorw",
+                app / "Contents" / "tools" / "hvigor" / "bin" / "hvigor",
+            ]
+        )
+
+    return unique_values(str(path.resolve()) for path in candidates if path.exists())
+
+
+def resolve_hvigor_path(repo: Path) -> tuple[str | None, list[str], str | None]:
+    candidates = candidate_hvigor_paths(repo)
+    for item in candidates:
+        path = Path(item)
+        if is_executable_file(path):
+            kind = "repo-wrapper" if path.parent == repo else "path"
+            return item, candidates, kind
+    return None, candidates, None
+
+
+def resolve_optional_tool(command_name: str) -> tuple[str | None, list[str]]:
+    candidates = which_all(command_name)
+    return (candidates[0] if candidates else None), candidates
 
 
 def validate_hvigor_task(task: str) -> str | None:
@@ -390,43 +490,28 @@ def read_file_tail(path: Path, *, max_lines: int = HVIGOR_OUTPUT_TAIL_LINES, max
     return "\n".join(lines[-max_lines:])
 
 
-def read_file_head(path: Path, *, max_bytes: int = 4096) -> str:
-    if not path.exists():
-        return ""
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes)
-    return data.decode("utf-8", errors="replace")
-
-
-def extract_powershell_pid(text: str) -> int | None:
-    match = re.search(rf"^{re.escape(POWERSHELL_PID_MARKER)}(\d+)\s*$", text, re.MULTILINE)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
 def clean_hvigor_output(text: str) -> str:
     lines = []
     for line in strip_ansi(text).splitlines():
-        if line.startswith(POWERSHELL_PID_MARKER):
-            continue
         if line.strip():
             lines.append(line)
     return "\n".join(lines)
 
 
-def terminate_process_tree(process: subprocess.Popen, windows_pid: int | None) -> str | None:
-    pid = windows_pid or process.pid
+def terminate_process_tree(process: subprocess.Popen) -> str | None:
     try:
-        result = subprocess.run(
-            ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode != 0:
-            return f"taskkill.exe exited with code {result.returncode}"
+        if os.name == "nt":
+            result = subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                return f"taskkill.exe exited with code {result.returncode}"
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=10)
         return None
     except Exception as error:
@@ -437,159 +522,15 @@ def terminate_process_tree(process: subprocess.Popen, windows_pid: int | None) -
         return f"failed to terminate hvigor process tree: {error}"
 
 
-def gather_windows_env() -> dict:
-    script = """
-$result = [ordered]@{
-  userProfile = $env:USERPROFILE
-  nodeHomeUser = [Environment]::GetEnvironmentVariable('NODE_HOME', 'User')
-  nodeHomeMachine = [Environment]::GetEnvironmentVariable('NODE_HOME', 'Machine')
-  devecoSdkHomeUser = [Environment]::GetEnvironmentVariable('DEVECO_SDK_HOME', 'User')
-  devecoSdkHomeMachine = [Environment]::GetEnvironmentVariable('DEVECO_SDK_HOME', 'Machine')
-  nvmHomeUser = [Environment]::GetEnvironmentVariable('NVM_HOME', 'User')
-  nvmHomeMachine = [Environment]::GetEnvironmentVariable('NVM_HOME', 'Machine')
-  nvmSymlinkUser = [Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'User')
-  nvmSymlinkMachine = [Environment]::GetEnvironmentVariable('NVM_SYMLINK', 'Machine')
-  pathUser = [Environment]::GetEnvironmentVariable('Path', 'User')
-  pathMachine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-}
-$result | ConvertTo-Json -Compress
-"""
-    return parse_json_output(run_powershell(script))
-
-
-def gather_lookup_paths() -> dict:
-    script = """
-$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-$result = [ordered]@{
-  node = @(where.exe node 2>$null)
-  npmCmd = @(where.exe npm.cmd 2>$null)
-  hvigorw = @(where.exe hvigorw.bat 2>$null)
-}
-$result | ConvertTo-Json -Compress
-"""
-    payload = parse_json_output(run_powershell(script))
-    return {
-        "node": ensure_list(payload.get("node")),
-        "npm_cmd": ensure_list(payload.get("npmCmd")),
-        "hvigorw": ensure_list(payload.get("hvigorw")),
-    }
-
-
-def resolve_repo_paths(repo_arg: str | None) -> dict:
-    repo_input = repo_arg or os.getcwd()
-    repo_windows = None
-    repo_wsl = None
-
-    if is_windows_path(repo_input):
-        repo_windows = normalize_windows_path(repo_input)
-        if RUNTIME == "wsl":
-            repo_local = windows_to_wsl_path(repo_windows)
-            repo_wsl = repo_local
-        else:
-            repo_local = str(Path(repo_windows).resolve())
-        return {
-            "input": repo_input,
-            "local_path": repo_local,
-            "windows_path": repo_windows,
-            "wsl_path": repo_wsl,
-            "windows_compatible": True,
-            "local_exists": host_path_exists(repo_windows),
-        }
-
-    if is_wsl_mounted_windows_path(repo_input):
-        repo_wsl = str(Path(repo_input).resolve())
-        repo_windows = wsl_to_windows_path(repo_wsl)
-        return {
-            "input": repo_input,
-            "local_path": repo_wsl,
-            "windows_path": repo_windows,
-            "wsl_path": repo_wsl,
-            "windows_compatible": True,
-            "local_exists": Path(repo_wsl).exists(),
-        }
-
-    repo_local = str(Path(repo_input).resolve())
-    windows_compatible = False
-    if RUNTIME == "windows":
-        repo_windows = normalize_windows_path(repo_local) if is_windows_path(repo_local) else None
-        windows_compatible = bool(repo_windows)
-    elif is_wsl_mounted_windows_path(repo_local):
-        repo_wsl = repo_local
-        repo_windows = wsl_to_windows_path(repo_wsl)
-        windows_compatible = True
-    else:
-        repo_wsl = repo_local if RUNTIME == "wsl" else None
-
-    return {
-        "input": repo_input,
-        "local_path": repo_local,
-        "windows_path": repo_windows,
-        "wsl_path": repo_wsl,
-        "windows_compatible": windows_compatible,
-        "local_exists": Path(repo_local).exists(),
-    }
-
-
-def resolve_node_home(env_info: dict, lookup_paths: dict) -> tuple[str | None, str | None, list[str]]:
-    candidates = [
-        env_info.get("nodeHomeUser"),
-        env_info.get("nodeHomeMachine"),
-    ]
-    for node_path in lookup_paths.get("node", []):
-        normalized = normalize_windows_path(node_path)
-        if is_windows_path(normalized):
-            candidates.append(str(PureWindowsPath(normalized).parent))
-    candidates.append(DEFAULT_NODE_HOME)
-
-    node_homes = unique_values(normalize_windows_path(item) for item in candidates if item)
-    for node_home in node_homes:
-        node_exe = normalize_windows_path(node_home + r"\node.exe")
-        if host_path_exists(node_exe):
-            return node_home, node_exe, node_homes
-    return None, None, node_homes
-
-
-def resolve_hvigorw_path(lookup_paths: dict) -> tuple[str | None, list[str]]:
-    candidates = unique_values([DEFAULT_HVIGOR, *lookup_paths.get("hvigorw", [])])
-    for candidate in candidates:
-        normalized = normalize_windows_path(candidate)
-        if host_path_exists(normalized):
-            return normalized, candidates
-    return None, candidates
-
-
-def should_expand_sdk_root(path_text: str) -> bool:
-    return PureWindowsPath(normalize_windows_path(path_text)).name.lower() == "sdk"
-
-
-def candidate_sdk_roots(env_info: dict) -> list[str]:
-    user_profile = env_info.get("userProfile") or r"C:\Users\Default"
-    candidates = [
-        env_info.get("devecoSdkHomeUser"),
-        env_info.get("devecoSdkHomeMachine"),
-        DEFAULT_DEVECO_SDK_HOME,
-        r"C:\Program Files\Huawei\DevEco Studio\sdk\default",
-        user_profile + r"\AppData\Local\OpenHarmony\Sdk",
-        user_profile + r"\AppData\Local\Huawei\Sdk",
-    ]
-    normalized = [normalize_windows_path(candidate) for candidate in candidates if candidate]
-    expanded = []
-    for candidate in unique_values(normalized):
-        if not host_path_exists(candidate):
-            continue
-        expanded.append(candidate)
-        if should_expand_sdk_root(candidate):
-            expanded.extend(host_dir_children(candidate))
-    return unique_values(normalize_windows_path(candidate) for candidate in expanded if candidate)
-
-
 def run_hvigor_task(
-    repo_windows: str,
-    node_home: str,
+    repo_local: str,
     sdk_home: str,
-    hvigorw_path: str,
+    hvigor_path: str,
     task: str,
     timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+    *,
+    node_home: str | None = None,
+    java_home: str | None = None,
 ) -> dict:
     task_error = validate_hvigor_task(task)
     if task_error:
@@ -597,42 +538,67 @@ def run_hvigor_task(
             "success": False,
             "exit_code": 2,
             "output": task_error,
+            "timed_out": False,
         }
 
-    script = f"""
-Write-Output "{POWERSHELL_PID_MARKER}$PID"
-$env:NODE_HOME = {ps_literal(node_home)}
-$env:DEVECO_SDK_HOME = {ps_literal(sdk_home)}
-$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-Set-Location {ps_literal(repo_windows)}
-& {ps_literal(hvigorw_path)} {ps_literal(task)}
-exit $LASTEXITCODE
-"""
+    hvigor = Path(hvigor_path)
+    if not is_executable_file(hvigor):
+        return {
+            "success": False,
+            "exit_code": 126,
+            "output": f"hvigor executable is missing or not executable: {hvigor_path}",
+            "timed_out": False,
+        }
+
+    repo = Path(repo_local)
+    env = os.environ.copy()
+    env["DEVECO_SDK_HOME"] = sdk_home
+    env.setdefault("HOS_SDK_HOME", sdk_home)
+    env.setdefault("OHOS_SDK_HOME", sdk_home)
+    if node_home:
+        env["NODE_HOME"] = node_home
+        env["PATH"] = str(Path(node_home) / "bin") + os.pathsep + env.get("PATH", "")
+    if java_home:
+        env["JAVA_HOME"] = java_home
+
     log_path = None
     timed_out = False
     cleanup_error = None
+    started_at = time.monotonic()
+    exit_code = 1
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", errors="replace", delete=False) as log_file:
             log_path = Path(log_file.name)
-            process = subprocess.Popen(
-                ["powershell.exe", "-NoProfile", "-Command", script],
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            popen_kwargs = {
+                "cwd": repo,
+                "stdout": log_file,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "env": env,
+            }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+            process = subprocess.Popen([str(hvigor), task], **popen_kwargs)
             try:
                 exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 exit_code = 124
                 log_file.flush()
-                pid_output = "\n".join([read_file_head(log_path), read_file_tail(log_path)])
-                cleanup_error = terminate_process_tree(process, extract_powershell_pid(pid_output))
+                cleanup_error = terminate_process_tree(process)
 
             log_file.flush()
         output = clean_hvigor_output(read_file_tail(log_path)).strip() if log_path else ""
+    except OSError as error:
+        return {
+            "success": False,
+            "exit_code": getattr(error, "errno", 1) or 1,
+            "output": str(error),
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
     finally:
         if log_path:
             try:
@@ -642,14 +608,14 @@ exit $LASTEXITCODE
 
     if timed_out:
         timeout_message = f"hvigor task timed out after {timeout_seconds} seconds."
-        output = "\n".join(part for part in [output, timeout_message] if part)
-        if cleanup_error:
-            output = "\n".join([output, cleanup_error])
+        output = "\n".join(part for part in [output, timeout_message, cleanup_error] if part)
 
     return {
         "success": exit_code == 0,
         "exit_code": exit_code,
         "output": output,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started_at, 3),
     }
 
 
@@ -660,125 +626,133 @@ def summarize_output(text: str, max_lines: int = 8) -> str:
     return "\n".join(lines[-max_lines:])
 
 
-def probe_sdk(repo_windows: str | None, node_home: str | None, hvigorw_path: str | None, sdk_candidates: list[str]) -> tuple[str | None, list[dict]]:
-    if not repo_windows or not node_home or not hvigorw_path:
-        return None, []
-    probes = []
-    for candidate in sdk_candidates:
-        outcome = run_hvigor_task(repo_windows, node_home, candidate, hvigorw_path, "tasks")
-        probes.append(
-            {
-                "sdk_home": candidate,
-                "success": outcome["success"],
-                "exit_code": outcome["exit_code"],
-                "summary": summarize_output(outcome["output"]),
-            }
-        )
-        if outcome["success"]:
-            return candidate, probes
-    return None, probes
+def detect_environment_for_repo(
+    repo_info: dict,
+    *,
+    preflight: bool,
+    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+) -> dict:
+    repo = Path(repo_info["local_path"])
+    project_markers = detect_project_markers(repo)
+    node_home, node_path, node_candidates = resolve_node()
+    java_home, java_path, java_candidates = resolve_java()
+    sdk_home, sdk_candidates = resolve_sdk_root()
+    hvigor_path, hvigor_candidates, hvigor_kind = resolve_hvigor_path(repo)
+    ohpm_path, ohpm_candidates = resolve_optional_tool("ohpm")
+    hdc_path, hdc_candidates = resolve_optional_tool("hdc")
+    deveco_apps = candidate_deveco_apps()
 
-
-def detect_nvm_residue(env_info: dict) -> list[dict]:
-    user_profile = env_info.get("userProfile") or r"C:\Users\Default"
-    candidates = unique_values(
-        [
-            env_info.get("nvmHomeUser"),
-            env_info.get("nvmHomeMachine"),
-            env_info.get("nvmSymlinkUser"),
-            env_info.get("nvmSymlinkMachine"),
-            user_profile + r"\AppData\Local\nvm",
-            r"C:\nvm4w",
-            r"C:\Program Files\nvm",
-        ]
-    )
-    residues = []
-    for candidate in candidates:
-        normalized = normalize_windows_path(candidate)
-        if host_path_exists(normalized):
-            residues.append({"path": normalized, "exists": True})
-    return residues
-
-
-def detect_environment_for_repo(repo_info: dict, probe_sdk_roots: bool) -> dict:
-    env_info = gather_windows_env()
-    lookup_paths = gather_lookup_paths()
-    node_home, node_path, node_candidates = resolve_node_home(env_info, lookup_paths)
-    hvigorw_path, hvigor_candidates = resolve_hvigorw_path(lookup_paths)
-    sdk_candidates = candidate_sdk_roots(env_info)
-
-    if probe_sdk_roots:
-        sdk_home, sdk_probes = probe_sdk(repo_info["windows_path"], node_home, hvigorw_path, sdk_candidates)
-    else:
-        sdk_home = env_info.get("devecoSdkHomeUser") or env_info.get("devecoSdkHomeMachine")
-        sdk_home = normalize_windows_path(sdk_home) if sdk_home else None
-        if sdk_home and not host_path_exists(sdk_home):
-            sdk_home = None
-        sdk_probes = []
-
-    ready = bool(
-        repo_info["windows_compatible"]
-        and repo_info["windows_path"]
-        and repo_info["local_exists"]
-        and node_home
+    static_ready = bool(
+        repo_info["local_exists"]
+        and project_markers
         and node_path
-        and hvigorw_path
         and sdk_home
+        and hvigor_path
     )
+    preflight_result = None
+    ready = static_ready
+    if preflight and static_ready:
+        preflight_result = run_hvigor_task(
+            repo_info["local_path"],
+            sdk_home,
+            hvigor_path,
+            "tasks",
+            timeout_seconds=timeout_seconds,
+            node_home=node_home,
+            java_home=java_home,
+        )
+        ready = preflight_result["success"]
+
+    blockers = []
+    if not repo_info["local_exists"]:
+        blockers.append("repo_missing")
+    if not project_markers:
+        blockers.append("harmony_project_markers_missing")
+    if not node_path:
+        blockers.append("node_missing")
+    if not sdk_home:
+        blockers.append("sdk_missing")
+    if not hvigor_path:
+        blockers.append("hvigor_missing_or_not_executable")
+    if preflight and preflight_result and not preflight_result["success"]:
+        blockers.append("hvigor_preflight_failed")
 
     return {
+        "version": CACHE_SCHEMA_VERSION,
         "ready": ready,
         "runtime": {
             "host": RUNTIME,
+            "platform": platform.platform(),
         },
         "repo": repo_info,
+        "project": {
+            "markers": project_markers,
+            "is_harmony_project": bool(project_markers),
+        },
         "resolved": {
             "node_home": node_home,
             "node_path": node_path,
-            "deveco_sdk_home": sdk_home,
-            "hvigorw_path": hvigorw_path,
+            "java_home": java_home,
+            "java_path": java_path,
+            "sdk_home": sdk_home,
+            "hvigor_path": hvigor_path,
+            "hvigor_kind": hvigor_kind,
+            "ohpm_path": ohpm_path,
+            "hdc_path": hdc_path,
+            "deveco_app": deveco_apps[0] if deveco_apps else None,
         },
         "candidates": {
-            "node_home": node_candidates,
-            "deveco_sdk_home": sdk_candidates,
-            "hvigorw_path": hvigor_candidates,
+            "node_path": node_candidates,
+            "java_path": java_candidates,
+            "sdk_home": sdk_candidates,
+            "hvigor_path": hvigor_candidates,
+            "ohpm_path": ohpm_candidates,
+            "hdc_path": hdc_candidates,
+            "deveco_app": deveco_apps,
         },
-        "registry_env": {
-            "node_home_user": env_info.get("nodeHomeUser"),
-            "node_home_machine": env_info.get("nodeHomeMachine"),
-            "deveco_sdk_home_user": env_info.get("devecoSdkHomeUser"),
-            "deveco_sdk_home_machine": env_info.get("devecoSdkHomeMachine"),
-        },
-        "lookups": lookup_paths,
-        "sdk_probes": sdk_probes,
-        "nvm_residue": detect_nvm_residue(env_info),
+        "preflight": preflight_result,
+        "blockers": blockers,
     }
 
 
-def detect_environment(repo_arg: str | None, probe_sdk_roots: bool) -> dict:
-    return detect_environment_for_repo(resolve_repo_paths(repo_arg), probe_sdk_roots)
+def detect_environment(repo_arg: str | None, *, preflight: bool) -> dict:
+    return detect_environment_for_repo(resolve_repo_paths(repo_arg), preflight=preflight)
 
 
 def resolve_detection(
     repo_arg: str | None,
     *,
-    probe_sdk_roots: bool,
+    preflight: bool,
     refresh: bool,
     allow_cache: bool,
+    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
 ) -> dict:
     repo_info = resolve_repo_paths(repo_arg)
     cache_path = cache_file_for_repo(repo_info)
 
-    if allow_cache and not refresh:
+    if allow_cache and preflight and not refresh:
         cached_result, _cache_meta = load_cached_detection(repo_info)
         if cached_result:
             return cached_result
 
-    result = detect_environment_for_repo(repo_info, probe_sdk_roots=probe_sdk_roots)
-    if probe_sdk_roots and result["ready"]:
+    result = detect_environment_for_repo(repo_info, preflight=preflight, timeout_seconds=timeout_seconds)
+    if preflight and result["ready"]:
         result["cache"] = save_cached_detection(result)
     else:
         result["cache"] = build_cache_metadata(cache_path, "fresh", saved=False)
+    return result
+
+
+def resolve_verification_detection(repo_arg: str | None, *, refresh: bool) -> dict:
+    repo_info = resolve_repo_paths(repo_arg)
+    cache_path = cache_file_for_repo(repo_info)
+    if not refresh:
+        cached_result, _cache_meta = load_cached_detection(repo_info)
+        if cached_result:
+            return cached_result
+
+    result = detect_environment_for_repo(repo_info, preflight=False)
+    result["cache"] = build_cache_metadata(cache_path, "fresh", saved=False)
     return result
 
 
@@ -786,17 +760,30 @@ def print_detection(result: dict) -> None:
     repo = result["repo"]
     resolved = result["resolved"]
     cache = result.get("cache") or {}
+    project = result.get("project") or {}
+    preflight = result.get("preflight") or {}
+
     print(f"Runtime host: {result['runtime']['host']}")
     print(f"Repo input: {repo['input']}")
     print(f"Repo local path: {repo['local_path']}")
     print(f"Repo local exists: {'yes' if repo['local_exists'] else 'no'}")
-    print(f"Repo Windows path: {repo['windows_path'] or 'NOT AVAILABLE'}")
-    print(f"Repo WSL path: {repo['wsl_path'] or 'NOT AVAILABLE'}")
-    print(f"Windows-compatible repo: {'yes' if repo['windows_compatible'] else 'no'}")
-    print(f"NODE_HOME: {resolved['node_home'] or 'NOT FOUND'}")
-    print(f"node.exe: {resolved['node_path'] or 'NOT FOUND'}")
-    print(f"DEVECO_SDK_HOME: {resolved['deveco_sdk_home'] or 'NOT FOUND'}")
-    print(f"hvigorw.bat: {resolved['hvigorw_path'] or 'NOT FOUND'}")
+    print(f"Harmony project markers: {', '.join(project.get('markers') or []) or 'NOT FOUND'}")
+    print(f"Node: {resolved['node_path'] or 'NOT FOUND'}")
+    print(f"JAVA_HOME: {resolved['java_home'] or 'NOT FOUND'}")
+    print(f"Java: {resolved['java_path'] or 'NOT FOUND'}")
+    print(f"Harmony SDK: {resolved['sdk_home'] or 'NOT FOUND'}")
+    print(f"hvigor: {resolved['hvigor_path'] or 'NOT FOUND'}")
+    print(f"ohpm: {resolved['ohpm_path'] or 'NOT FOUND'}")
+    print(f"hdc: {resolved['hdc_path'] or 'NOT FOUND'}")
+    print(f"DevEco Studio: {resolved['deveco_app'] or 'NOT FOUND'}")
+    if preflight:
+        print(f"Preflight task: tasks")
+        print(f"Preflight status: {'OK' if preflight.get('success') else 'FAIL'}")
+        if preflight.get("output"):
+            print("Preflight output:")
+            print(summarize_output(preflight["output"]))
+    if result.get("blockers"):
+        print(f"Blockers: {', '.join(result['blockers'])}")
     if cache:
         print(f"Detection source: {cache['source']}")
         print(f"Environment cache saved: {'yes' if cache.get('saved') else 'no'}")
@@ -806,28 +793,29 @@ def print_detection(result: dict) -> None:
             print(f"Environment cache time: {cache['saved_at']}")
         if cache.get("invalid_reason"):
             print(f"Environment cache refresh reason: {cache['invalid_reason']}")
-    if result["nvm_residue"]:
-        print("NVM residue:")
-        for residue in result["nvm_residue"]:
-            print(f"  - {residue['path']}")
-    if result["sdk_probes"]:
-        print("SDK probes:")
-        for probe in result["sdk_probes"]:
-            status = "OK" if probe["success"] else "FAIL"
-            print(f"  - [{status}] {probe['sdk_home']}")
     print(f"Environment ready: {'yes' if result['ready'] else 'no'}")
+
+
+def sh_literal(value: str) -> str:
+    return shlex.quote(value)
 
 
 def print_env_snippet(result: dict) -> None:
     repo = result["repo"]
     resolved = result["resolved"]
-    if not resolved["node_home"] or not resolved["deveco_sdk_home"] or not repo["windows_path"]:
-        raise RuntimeError("Cannot print env snippet before resolving repo path, NODE_HOME, and DEVECO_SDK_HOME")
-    print(f"$env:NODE_HOME = {ps_literal(resolved['node_home'])}")
-    print(f"$env:DEVECO_SDK_HOME = {ps_literal(resolved['deveco_sdk_home'])}")
-    print("$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + `")
-    print("  [Environment]::GetEnvironmentVariable('Path', 'User')")
-    print(f"Set-Location {ps_literal(repo['windows_path'])}")
+    sdk_home = resolved.get("sdk_home")
+    if not repo.get("local_path") or not sdk_home:
+        raise RuntimeError("Cannot print env snippet before resolving repo path and Harmony SDK.")
+
+    print(f"export DEVECO_SDK_HOME={sh_literal(sdk_home)}")
+    print('export HOS_SDK_HOME="${HOS_SDK_HOME:-$DEVECO_SDK_HOME}"')
+    print('export OHOS_SDK_HOME="${OHOS_SDK_HOME:-$DEVECO_SDK_HOME}"')
+    if resolved.get("node_home"):
+        print(f"export NODE_HOME={sh_literal(resolved['node_home'])}")
+        print('export PATH="$NODE_HOME/bin:$PATH"')
+    if resolved.get("java_home"):
+        print(f"export JAVA_HOME={sh_literal(resolved['java_home'])}")
+    print(f"cd {sh_literal(repo['local_path'])}")
 
 
 def verify_task(result: dict, task: str, timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS) -> dict:
@@ -837,16 +825,23 @@ def verify_task(result: dict, task: str, timeout_seconds: int = HVIGOR_TASK_TIME
         return {
             "success": False,
             "exit_code": 1,
-            "output": "Environment is not ready for Windows-side hvigor verification.",
+            "output": "Environment is not ready for macOS Harmony hvigor verification.",
+            "timed_out": False,
         }
     return run_hvigor_task(
-        repo["windows_path"],
-        resolved["node_home"],
-        resolved["deveco_sdk_home"],
-        resolved["hvigorw_path"],
+        repo["local_path"],
+        resolved["sdk_home"],
+        resolved["hvigor_path"],
         task,
         timeout_seconds,
+        node_home=resolved.get("node_home"),
+        java_home=resolved.get("java_home"),
     )
+
+
+def looks_like_environment_failure(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker.lower() in lowered for marker in ENV_FAILURE_MARKERS)
 
 
 def positive_int(value: str) -> int:
@@ -857,26 +852,32 @@ def positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Detect and verify HarmonyOS Windows-side build environments.")
+    parser = argparse.ArgumentParser(description="Detect and verify macOS HarmonyOS/OpenHarmony hvigor environments.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    detect_parser = subparsers.add_parser("detect", help="Detect Windows-side HarmonyOS build environment.")
-    detect_parser.add_argument("--repo", help="WSL or Windows repo path. Defaults to current working directory.")
+    detect_parser = subparsers.add_parser("detect", help="Detect local macOS Harmony development environment.")
+    detect_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
     detect_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     detect_parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Ignore cached ready baselines and rerun full detection.",
+        help="Ignore cached ready baselines and rerun detection.",
+    )
+    detect_parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip 'hvigor tasks' preflight and only perform static environment detection.",
     )
     detect_parser.add_argument(
         "--skip-sdk-probe",
         action="store_true",
-        help="Do not probe SDK roots with hvigorw.bat tasks.",
+        dest="skip_preflight",
+        help=argparse.SUPPRESS,
     )
 
-    verify_parser = subparsers.add_parser("verify", help="Run Windows-side hvigor verification.")
-    verify_parser.add_argument("--repo", help="WSL or Windows repo path. Defaults to current working directory.")
-    verify_parser.add_argument("--task", default="tasks", help="hvigor task to run. Defaults to tasks.")
+    verify_parser = subparsers.add_parser("verify", help="Run a public hvigor task with the detected macOS environment.")
+    verify_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    verify_parser.add_argument("--task", default="tasks", help="Public hvigor task to run. Defaults to tasks.")
     verify_parser.add_argument(
         "--timeout-seconds",
         type=positive_int,
@@ -887,15 +888,15 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Ignore cached ready baselines and rerun full detection before verification.",
+        help="Ignore cached ready baselines and rerun detection before verification.",
     )
 
-    env_parser = subparsers.add_parser("print-env", help="Print a PowerShell env bootstrap snippet.")
-    env_parser.add_argument("--repo", help="WSL or Windows repo path. Defaults to current working directory.")
+    env_parser = subparsers.add_parser("print-env", help="Print a zsh/bash environment bootstrap snippet.")
+    env_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
     env_parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Ignore cached ready baselines and rerun full detection before printing env.",
+        help="Ignore cached ready baselines and rerun detection before printing env.",
     )
     return parser
 
@@ -906,12 +907,12 @@ def main() -> int:
 
     try:
         if args.command == "detect":
-            use_cache = not args.skip_sdk_probe
+            preflight = not args.skip_preflight
             result = resolve_detection(
                 args.repo,
-                probe_sdk_roots=not args.skip_sdk_probe,
+                preflight=preflight,
                 refresh=args.refresh,
-                allow_cache=use_cache,
+                allow_cache=preflight,
             )
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -920,11 +921,9 @@ def main() -> int:
             return 0 if result["ready"] else 1
 
         if args.command == "verify":
-            result = resolve_detection(
+            result = resolve_verification_detection(
                 args.repo,
-                probe_sdk_roots=True,
                 refresh=args.refresh,
-                allow_cache=True,
             )
             outcome = verify_task(result, args.task, args.timeout_seconds)
             refreshed_after_failure = False
@@ -933,14 +932,17 @@ def main() -> int:
                 and not outcome["success"]
                 and looks_like_environment_failure(outcome["output"])
             ):
-                result = resolve_detection(
+                result = resolve_verification_detection(
                     args.repo,
-                    probe_sdk_roots=True,
                     refresh=True,
-                    allow_cache=False,
                 )
                 outcome = verify_task(result, args.task, args.timeout_seconds)
                 refreshed_after_failure = True
+            if outcome["success"] and result.get("cache", {}).get("source") != "cache":
+                result = dict(result)
+                result["ready"] = True
+                result["preflight"] = {**outcome, "task": args.task}
+                result["cache"] = save_cached_detection(result)
             if args.json:
                 print(
                     json.dumps(
@@ -966,7 +968,7 @@ def main() -> int:
         if args.command == "print-env":
             result = resolve_detection(
                 args.repo,
-                probe_sdk_roots=True,
+                preflight=True,
                 refresh=args.refresh,
                 allow_cache=True,
             )
