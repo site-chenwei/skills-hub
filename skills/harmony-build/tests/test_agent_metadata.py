@@ -22,11 +22,15 @@ class HarmonyBuildAgentMetadataTests(unittest.TestCase):
         self.assertIsNotNone(prompt)
         assert prompt is not None
         self.assertIn(
-            "when build verification is needed run the chosen build task directly instead of inserting verify --task tasks first",
+            "when build verification is needed run the chosen public hvigor task directly instead of inserting verify --task tasks first",
             prompt,
         )
         self.assertIn(
             "Use verify --task tasks only when the user explicitly asks for task listing or when you are troubleshooting hvigor or environment drift",
+            prompt,
+        )
+        self.assertIn(
+            "Do not pass internal .hvigor task keys such as :entry:default@CompileArkTS",
             prompt,
         )
 

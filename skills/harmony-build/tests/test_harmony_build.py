@@ -216,6 +216,65 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertIn(sdk_root, candidates)
         self.assertIn(sdk_version, candidates)
 
+    def test_run_hvigor_task_redirects_output_to_file_not_pipe(self) -> None:
+        def fake_run(args, **kwargs):
+            self.assertNotIn("capture_output", kwargs)
+            self.assertIsNotNone(kwargs.get("stdout"))
+            self.assertEqual(kwargs.get("stderr"), HARMONY_BUILD.subprocess.STDOUT)
+            self.assertEqual(kwargs.get("timeout"), 12)
+            kwargs["stdout"].write("line before\nBUILD SUCCESSFUL in 1 s\n")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run) as run_mock:
+            outcome = HARMONY_BUILD.run_hvigor_task(
+                r"D:\workspace\demo",
+                r"C:\Node",
+                r"C:\Sdk",
+                r"C:\Huawei\hvigorw.bat",
+                "assembleApp",
+                timeout_seconds=12,
+            )
+
+        run_mock.assert_called_once()
+        self.assertTrue(outcome["success"])
+        self.assertEqual(outcome["exit_code"], 0)
+        self.assertIn("BUILD SUCCESSFUL", outcome["output"])
+
+    def test_run_hvigor_task_times_out_with_tail_summary(self) -> None:
+        def fake_run(args, **kwargs):
+            kwargs["stdout"].write("BUILD FAILED in 1 s\n")
+            raise HARMONY_BUILD.subprocess.TimeoutExpired(cmd=args, timeout=1)
+
+        with mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run):
+            outcome = HARMONY_BUILD.run_hvigor_task(
+                r"D:\workspace\demo",
+                r"C:\Node",
+                r"C:\Sdk",
+                r"C:\Huawei\hvigorw.bat",
+                "tasks",
+                timeout_seconds=1,
+            )
+
+        self.assertFalse(outcome["success"])
+        self.assertEqual(outcome["exit_code"], 124)
+        self.assertIn("BUILD FAILED", outcome["output"])
+        self.assertIn("timed out after 1 seconds", outcome["output"])
+
+    def test_run_hvigor_task_rejects_internal_task_key(self) -> None:
+        with mock.patch.object(HARMONY_BUILD.subprocess, "run") as run_mock:
+            outcome = HARMONY_BUILD.run_hvigor_task(
+                r"D:\workspace\demo",
+                r"C:\Node",
+                r"C:\Sdk",
+                r"C:\Huawei\hvigorw.bat",
+                r":entry:default@CompileArkTS",
+            )
+
+        run_mock.assert_not_called()
+        self.assertFalse(outcome["success"])
+        self.assertEqual(outcome["exit_code"], 2)
+        self.assertIn("not an internal .hvigor task key", outcome["output"])
+
 
 if __name__ == "__main__":
     unittest.main()

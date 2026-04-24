@@ -110,6 +110,9 @@ description: Use when a task needs HarmonyOS or OpenHarmony Windows-side hvigor 
   - 默认优先复用缓存基线；缺失、失效或显式 `--refresh` 时，才重新探测并刷新基线。
   - 重新构建 Windows `Path`，并把已解析出的 `NODE_HOME` 与 `DEVECO_SDK_HOME` 注入到 PowerShell 会话。
   - 在仓库对应的 Windows 路径下执行 `hvigorw.bat <task>`。
+  - hvigor 输出会重定向到临时文件，进程退出后只读取尾部摘要，避免 daemon / worker 继承 stdout/stderr pipe 后拖住 Python 包装层。
+  - 默认硬超时为 900 秒，可用 `--timeout-seconds <seconds>` 覆盖。
+  - `--task` 必须是公开 hvigor task 名；不要传 `.hvigor` 内部 key，例如 `:entry:default@CompileArkTS`。
   - 如果环境未 ready，会直接返回 `exit_code = 1`，不会启动 `hvigorw.bat`。
   - 如果缓存命中的验证报出典型环境错误，会自动刷新一次基线后重试。
 

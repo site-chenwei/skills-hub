@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
@@ -25,6 +26,9 @@ ENV_FAILURE_MARKERS = (
     "Invalid value of 'DEVECO_SDK_HOME' in the system environment path",
     "SDK component missing",
 )
+HVIGOR_TASK_TIMEOUT_SECONDS = 900
+HVIGOR_OUTPUT_TAIL_LINES = 80
+HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
 
 
 def strip_ansi(text: str) -> str:
@@ -353,6 +357,38 @@ def looks_like_environment_failure(output: str) -> bool:
     return any(marker in output for marker in ENV_FAILURE_MARKERS)
 
 
+def validate_hvigor_task(task: str) -> str | None:
+    if not task or not task.strip():
+        return "hvigor task must not be empty"
+    if any(char in task for char in "\r\n\x00"):
+        return "hvigor task must not contain control characters"
+    if "@" in task:
+        return (
+            "hvigor task must be a public task name, not an internal .hvigor task key "
+            "such as ':entry:default@CompileArkTS'"
+        )
+    return None
+
+
+def read_file_tail(path: Path, *, max_lines: int = HVIGOR_OUTPUT_TAIL_LINES, max_bytes: int = HVIGOR_OUTPUT_TAIL_BYTES) -> str:
+    if not path.exists():
+        return ""
+
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read()
+
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]
+    lines = [line for line in lines if line.strip()]
+    return "\n".join(lines[-max_lines:])
+
+
 def gather_windows_env() -> dict:
     script = """
 $result = [ordered]@{
@@ -499,7 +535,22 @@ def candidate_sdk_roots(env_info: dict) -> list[str]:
     return unique_values(normalize_windows_path(candidate) for candidate in expanded if candidate)
 
 
-def run_hvigor_task(repo_windows: str, node_home: str, sdk_home: str, hvigorw_path: str, task: str) -> dict:
+def run_hvigor_task(
+    repo_windows: str,
+    node_home: str,
+    sdk_home: str,
+    hvigorw_path: str,
+    task: str,
+    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+) -> dict:
+    task_error = validate_hvigor_task(task)
+    if task_error:
+        return {
+            "success": False,
+            "exit_code": 2,
+            "output": task_error,
+        }
+
     script = f"""
 $env:NODE_HOME = {ps_literal(node_home)}
 $env:DEVECO_SDK_HOME = {ps_literal(sdk_home)}
@@ -508,12 +559,43 @@ Set-Location {ps_literal(repo_windows)}
 & {ps_literal(hvigorw_path)} {ps_literal(task)}
 exit $LASTEXITCODE
 """
-    result = run_powershell(script)
-    combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    log_path = None
+    timed_out = False
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", errors="replace", delete=False) as log_file:
+            log_path = Path(log_file.name)
+            try:
+                result = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Command", script],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                exit_code = result.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                exit_code = 124
+
+        output = strip_ansi(read_file_tail(log_path)).strip() if log_path else ""
+    finally:
+        if log_path:
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+
+    if timed_out:
+        timeout_message = f"hvigor task timed out after {timeout_seconds} seconds."
+        output = "\n".join(part for part in [output, timeout_message] if part)
+
     return {
-        "success": result.returncode == 0,
-        "exit_code": result.returncode,
-        "output": strip_ansi(combined).strip(),
+        "success": exit_code == 0,
+        "exit_code": exit_code,
+        "output": output,
     }
 
 
@@ -694,7 +776,7 @@ def print_env_snippet(result: dict) -> None:
     print(f"Set-Location {ps_literal(repo['windows_path'])}")
 
 
-def verify_task(result: dict, task: str) -> dict:
+def verify_task(result: dict, task: str, timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS) -> dict:
     repo = result["repo"]
     resolved = result["resolved"]
     if not result["ready"]:
@@ -709,7 +791,15 @@ def verify_task(result: dict, task: str) -> dict:
         resolved["deveco_sdk_home"],
         resolved["hvigorw_path"],
         task,
+        timeout_seconds,
     )
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -733,6 +823,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser = subparsers.add_parser("verify", help="Run Windows-side hvigor verification.")
     verify_parser.add_argument("--repo", help="WSL or Windows repo path. Defaults to current working directory.")
     verify_parser.add_argument("--task", default="tasks", help="hvigor task to run. Defaults to tasks.")
+    verify_parser.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HVIGOR_TASK_TIMEOUT_SECONDS,
+        help=f"Hard timeout for the hvigor process wrapper. Defaults to {HVIGOR_TASK_TIMEOUT_SECONDS}.",
+    )
     verify_parser.add_argument("--json", action="store_true", help="Print detection result and verification outcome as JSON.")
     verify_parser.add_argument(
         "--refresh",
@@ -776,7 +872,7 @@ def main() -> int:
                 refresh=args.refresh,
                 allow_cache=True,
             )
-            outcome = verify_task(result, args.task)
+            outcome = verify_task(result, args.task, args.timeout_seconds)
             refreshed_after_failure = False
             if (
                 result.get("cache", {}).get("source") == "cache"
@@ -789,7 +885,7 @@ def main() -> int:
                     refresh=True,
                     allow_cache=False,
                 )
-                outcome = verify_task(result, args.task)
+                outcome = verify_task(result, args.task, args.timeout_seconds)
                 refreshed_after_failure = True
             if args.json:
                 print(
