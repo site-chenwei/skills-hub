@@ -116,7 +116,7 @@ class ReviewScopeTests(unittest.TestCase):
         self.assertTrue(changes[0]["status"].startswith("R"))
 
     def test_prepare_summary_for_output_escapes_non_utf8_paths_without_replacement(self) -> None:
-        raw_path = os.fsdecode(b"bad_\xff.txt")
+        raw_path = "bad_\udcff.txt"
         summary = {
             "repo_path": str(Path("/tmp/repo")),
             "scope_source": "explicit file list",
@@ -149,6 +149,65 @@ class ReviewScopeTests(unittest.TestCase):
         self.assertEqual(prepared["hottest_files"][0]["path"], r"bad_\xff.txt")
         self.assertNotIn("�", prepared["changed_files"][0]["path"])
 
+    def test_build_summary_marks_harmony_paths_with_specific_risks(self) -> None:
+        changes = [
+            {"path": "entry/src/main/ets/pages/Index.ets", "status": "M", "additions": 8, "deletions": 2},
+            {"path": "entry/src/main/module.json5", "status": "M", "additions": 3, "deletions": 1},
+            {"path": "entry/src/main/resources/base/element/string.json", "status": "M", "additions": 2, "deletions": 0},
+            {"path": "hvigorfile.ts", "status": "M", "additions": 1, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"]["harmony-source"], 1)
+        self.assertEqual(summary["categories"]["harmony-config"], 2)
+        self.assertEqual(summary["categories"]["harmony-resources"], 1)
+        self.assertIn("harmony-ui-structure", summary["risk_tags"])
+        self.assertIn("resource-wiring", summary["risk_tags"])
+        self.assertIn("build-toolchain", summary["risk_tags"])
+        self.assertTrue(any("Harmony" in item for item in summary["review_focus"]))
+
+    def test_build_summary_keeps_plain_harmony_ets_util_out_of_contract_risk(self) -> None:
+        changes = [
+            {"path": "entry/src/main/ets/utils/format.ets", "status": "M", "additions": 2, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"harmony-source": 1})
+        self.assertNotIn("harmony-ui-structure", summary["risk_tags"])
+        self.assertNotIn("public-contract", summary["risk_tags"])
+
+    def test_build_summary_marks_java_and_react_review_risks(self) -> None:
+        changes = [
+            {"path": "src/main/java/com/example/user/UserController.java", "status": "M", "additions": 6, "deletions": 1},
+            {"path": "src/main/java/com/example/user/UserDto.java", "status": "M", "additions": 2, "deletions": 0},
+            {"path": "src/main/resources/application-prod.yml", "status": "M", "additions": 2, "deletions": 0},
+            {"path": "db/migration/V2__users.sql", "status": "A", "additions": 9, "deletions": 0},
+            {"path": "web/src/routes/accounts.tsx", "status": "M", "additions": 5, "deletions": 1},
+            {"path": "web/src/services/api/authClient.ts", "status": "M", "additions": 4, "deletions": 0},
+            {"path": "web/src/components/Button.tsx", "status": "M", "additions": 3, "deletions": 0},
+            {"path": "pnpm-lock.yaml", "status": "M", "additions": 1, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"]["java-contract"], 2)
+        self.assertEqual(summary["categories"]["java-config"], 1)
+        self.assertEqual(summary["categories"]["migrations"], 1)
+        self.assertEqual(summary["categories"]["react-routing"], 1)
+        self.assertEqual(summary["categories"]["react-client-contract"], 1)
+        self.assertEqual(summary["categories"]["react-ui"], 1)
+        self.assertIn("public-contract", summary["risk_tags"])
+        self.assertIn("data-migration", summary["risk_tags"])
+        self.assertIn("config-behavior", summary["risk_tags"])
+        self.assertIn("react-routing", summary["risk_tags"])
+        self.assertIn("client-contract", summary["risk_tags"])
+        self.assertIn("security-sensitive", summary["risk_tags"])
+        self.assertIn("ui-regression", summary["risk_tags"])
+        self.assertTrue(any("React" in item for item in summary["review_focus"]))
+        self.assertTrue(any("迁移脚本" in item for item in summary["review_focus"]))
+
     def test_build_summary_marks_deleted_tests_as_test_gap_for_risky_changes(self) -> None:
         changes = [
             {"path": "src/app.py", "status": "M", "additions": 3, "deletions": 1},
@@ -161,6 +220,83 @@ class ReviewScopeTests(unittest.TestCase):
         self.assertEqual(summary["test_changes"]["deleted"], 1)
         self.assertEqual(summary["test_changes"]["non_deleted"], 0)
         self.assertTrue(any("删除了测试" in item for item in summary["review_focus"]))
+
+    def test_build_summary_keeps_non_react_package_json_as_dependency_only(self) -> None:
+        changes = [
+            {"path": "package.json", "status": "M", "additions": 1, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"dependencies": 1})
+        self.assertIn("dependencies", summary["risk_tags"])
+        self.assertIn("build-toolchain", summary["risk_tags"])
+        self.assertNotIn("react-routing", summary["risk_tags"])
+        self.assertNotIn("client-contract", summary["risk_tags"])
+        self.assertNotIn("ui-regression", summary["risk_tags"])
+
+    def test_build_summary_keeps_non_react_auth_as_security_only(self) -> None:
+        changes = [
+            {"path": "src/auth.ts", "status": "M", "additions": 1, "deletions": 0},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"source": 1})
+        self.assertIn("security-sensitive", summary["risk_tags"])
+        self.assertNotIn("client-contract", summary["risk_tags"])
+        self.assertNotIn("react-routing", summary["risk_tags"])
+        self.assertNotIn("ui-regression", summary["risk_tags"])
+        self.assertNotIn("public-contract", summary["risk_tags"])
+
+    def test_build_summary_marks_react_auth_with_stack_context(self) -> None:
+        changes = [
+            {"path": "web/src/auth.ts", "status": "M", "additions": 3, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"react-client-contract": 1})
+        self.assertIn("client-contract", summary["risk_tags"])
+        self.assertIn("security-sensitive", summary["risk_tags"])
+        self.assertIn("public-contract", summary["risk_tags"])
+
+    def test_build_summary_does_not_treat_author_file_as_auth_risk(self) -> None:
+        changes = [
+            {"path": "src/author.ts", "status": "M", "additions": 1, "deletions": 0},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"source": 1})
+        self.assertNotIn("security-sensitive", summary["risk_tags"])
+        self.assertNotIn("public-contract", summary["risk_tags"])
+
+    def test_build_summary_marks_pure_react_ui_without_public_contract(self) -> None:
+        changes = [
+            {"path": "web/src/components/Button.tsx", "status": "M", "additions": 3, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"react-ui": 1})
+        self.assertIn("ui-regression", summary["risk_tags"])
+        self.assertNotIn("public-contract", summary["risk_tags"])
+        self.assertNotIn("client-contract", summary["risk_tags"])
+
+    def test_collect_explicit_files_treats_windows_absolute_paths_as_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            if os.name != "nt":
+                (repo / "C:" / "tmp").mkdir(parents=True)
+                (repo / "C:" / "tmp" / "file.ts").write_text("export const value = 1;\n", encoding="utf-8")
+
+            changes, scope_source = REVIEW_SCOPE.collect_explicit_files(repo, [r"C:\tmp\file.ts"])
+
+        self.assertEqual(scope_source, "explicit file list")
+        self.assertEqual(changes[0]["path"], "C:/tmp/file.ts")
+        self.assertEqual(changes[0]["status"], "missing")
+        self.assertEqual(changes[0]["additions"], 0)
 
 
 if __name__ == "__main__":

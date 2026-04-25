@@ -2,7 +2,8 @@
 
 import argparse
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PureWindowsPath
 
 
 MONOREPO_ROOT_DIRS = {
@@ -14,6 +15,90 @@ MONOREPO_ROOT_DIRS = {
     "projects",
     "skills",
     "crates",
+}
+
+HIGH_RISK_PATH_CATEGORIES = {
+    "harmony-high-risk",
+    "java-high-risk",
+    "react-high-risk",
+}
+
+HARMONY_CONFIG_NAMES = {
+    "build-profile.json5",
+    "oh-package.json5",
+    "module.json5",
+    "app.json5",
+}
+
+JAVA_DEPENDENCY_NAMES = {
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradlew",
+    "gradlew.bat",
+}
+
+JAVA_HIGH_RISK_SEGMENTS = {
+    "api",
+    "config",
+    "controller",
+    "controllers",
+    "dto",
+    "migration",
+    "migrations",
+    "schema",
+}
+
+JAVA_HIGH_RISK_FILE_SUFFIXES = (
+    "controller.java",
+    "dto.java",
+    "request.java",
+    "response.java",
+)
+
+HARMONY_UI_STRUCTURE_SEGMENTS = {
+    "abilities",
+    "entryability",
+    "navigation",
+    "navigator",
+    "page",
+    "pages",
+    "router",
+    "tabs",
+}
+
+REACT_SOURCE_EXTENSIONS = {
+    ".cjs",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".ts",
+    ".tsx",
+}
+
+REACT_STACK_CONTEXT_SEGMENTS = {
+    "frontend",
+    "next",
+    "react",
+    "remix",
+    "storybook",
+    "web",
+}
+
+REACT_HIGH_RISK_SEGMENTS = {
+    "api",
+    "api-client",
+    "auth",
+    "data",
+    "design-system",
+    "loaders",
+    "routing",
+    "routes",
+    "schema",
+    "schemas",
+    "server",
 }
 
 
@@ -37,18 +122,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def is_windows_absolute_path(raw_path: str) -> bool:
+    return PureWindowsPath(raw_path).is_absolute()
+
+
+def normalize_path_for_output(raw_path: str) -> str:
+    return raw_path.replace("\\", "/")
+
+
 def normalize_relpath(repo: Path, raw_path: str) -> tuple[str, bool]:
     path = Path(raw_path)
+    if not path.is_absolute() and is_windows_absolute_path(raw_path):
+        return normalize_path_for_output(raw_path), True
+    if raw_path.startswith("/") and not raw_path.startswith("//") and not path.is_absolute():
+        return normalize_path_for_output(raw_path), True
     resolved = path.resolve() if path.is_absolute() else (repo / path).resolve()
     try:
-        return str(resolved.relative_to(repo)).replace("\\", "/"), False
+        return normalize_path_for_output(str(resolved.relative_to(repo))), False
     except ValueError:
-        return str(resolved).replace("\\", "/"), True
+        if path.is_absolute():
+            return normalize_path_for_output(str(resolved)), True
+    return normalize_path_for_output(str(resolved)), True
 
 
 def infer_module_name(path_text: str) -> str:
     path = Path(path_text)
-    if path.is_absolute():
+    if path_text.startswith("/") and not path_text.startswith("//") and not path.is_absolute():
+        return "(outside repo)"
+    if path.is_absolute() or is_windows_absolute_path(path_text):
         return "(outside repo)"
     parts = path.parts
     if len(parts) <= 1:
@@ -56,6 +157,27 @@ def infer_module_name(path_text: str) -> str:
     if parts[0] in MONOREPO_ROOT_DIRS and len(parts) >= 2:
         return "/".join(parts[:2])
     return parts[0]
+
+
+def normalized_path_text(path_text: str) -> str:
+    return path_text.replace("\\", "/").lower()
+
+
+def path_segments(path_text: str) -> set[str]:
+    return {segment for segment in normalized_path_text(path_text).split("/") if segment}
+
+
+def semantic_path_tokens(path_text: str) -> set[str]:
+    tokens = set()
+    for segment in normalize_path_for_output(path_text).split("/"):
+        stem = Path(segment).stem
+        separated = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", stem)
+        tokens.update(token.lower() for token in re.split(r"[^A-Za-z0-9]+", separated) if token)
+    return tokens
+
+
+def has_semantic_path_term(path_text: str, terms: set[str]) -> bool:
+    return bool(path_segments(path_text) & terms or semantic_path_tokens(path_text) & terms)
 
 
 def categorize_path(path_text: str) -> str:
@@ -88,10 +210,15 @@ def categorize_path(path_text: str) -> str:
         "pom.xml",
         "build.gradle",
         "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "gradlew.bat",
+        "oh-package.json5",
     }:
         return "dependencies"
     if (
-        lowered.endswith((".yaml", ".yml", ".toml", ".ini", ".cfg"))
+        lowered.endswith((".yaml", ".yml", ".toml", ".ini", ".cfg", ".json5"))
         or name in {"makefile", "dockerfile", ".env", ".env.example"}
         or "/config/" in lowered
         or lowered.startswith(".github/workflows/")
@@ -105,6 +232,7 @@ def categorize_path(path_text: str) -> str:
         ".tsx",
         ".js",
         ".jsx",
+        ".ets",
         ".go",
         ".rs",
         ".java",
@@ -117,6 +245,123 @@ def categorize_path(path_text: str) -> str:
     }:
         return "source"
     return "other"
+
+
+def is_harmony_high_risk_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    if name in HARMONY_CONFIG_NAMES or name.startswith("hvigorfile."):
+        return True
+    if lowered.startswith("appscope/") and name == "app.json5":
+        return True
+    if "/resources/" in f"/{lowered}/":
+        return True
+    if lowered.endswith(".ets"):
+        return bool(path_segments(path_text) & HARMONY_UI_STRUCTURE_SEGMENTS)
+    return False
+
+
+def is_harmony_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    return (
+        lowered.endswith(".ets")
+        or name in HARMONY_CONFIG_NAMES
+        or name.startswith("hvigorfile.")
+        or lowered.startswith("entry/")
+        or lowered.startswith("feature/")
+        or lowered.startswith("appscope/")
+    )
+
+
+def is_java_high_risk_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    segments = path_segments(path_text)
+    if name in JAVA_DEPENDENCY_NAMES:
+        return True
+    if name.startswith("application.") or name.startswith("bootstrap."):
+        return True
+    if lowered.endswith(".sql") or "migration" in lowered or "/db/migrate/" in f"/{lowered}":
+        return True
+    java_like_source = lowered.endswith((".java", ".kt")) or "/src/main/java/" in f"/{lowered}" or "/src/test/java/" in f"/{lowered}"
+    if java_like_source and (segments & JAVA_HIGH_RISK_SEGMENTS or name.endswith(JAVA_HIGH_RISK_FILE_SUFFIXES)):
+        return True
+    return False
+
+
+def is_java_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    return (
+        lowered.endswith((".java", ".kt"))
+        or name in JAVA_DEPENDENCY_NAMES
+        or name.startswith("application.")
+        or name.startswith("bootstrap.")
+        or "/src/main/java/" in f"/{lowered}"
+        or "/src/test/java/" in f"/{lowered}"
+    )
+
+
+def is_react_source_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    return Path(lowered).suffix in REACT_SOURCE_EXTENSIONS
+
+
+def has_react_stack_context(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    segments = path_segments(path_text)
+    return (
+        lowered.endswith((".tsx", ".jsx"))
+        or lowered.startswith(".storybook/")
+        or bool(segments & REACT_STACK_CONTEXT_SEGMENTS)
+        or any(name.startswith(prefix) for prefix in ["next.config.", "vite.config.", "remix.config."])
+    )
+
+
+def is_react_high_risk_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    segments = path_segments(path_text)
+    if any(name.startswith(prefix) for prefix in ["next.config.", "vite.config.", "remix.config."]):
+        return True
+    if not is_react_source_path(path_text) or not has_react_stack_context(path_text):
+        return False
+    if segments & REACT_HIGH_RISK_SEGMENTS:
+        return True
+    if has_semantic_path_term(path_text, {"auth"}):
+        return True
+    if any(marker in f"/{lowered}" for marker in ["/app/", "/pages/", "/router", "/ssr"]):
+        return True
+    return False
+
+
+def is_react_path(path_text: str) -> bool:
+    lowered = normalized_path_text(path_text)
+    name = Path(lowered).name
+    return (
+        (is_react_source_path(path_text) and has_react_stack_context(path_text))
+        or any(name.startswith(prefix) for prefix in ["next.config.", "vite.config.", "remix.config."])
+        or lowered.startswith(".storybook/")
+    )
+
+
+def classify_path(path_text: str) -> set[str]:
+    categories = {categorize_path(path_text)}
+    if is_harmony_high_risk_path(path_text):
+        categories.add("harmony-high-risk")
+    elif is_harmony_path(path_text):
+        categories.add("harmony")
+    if is_java_high_risk_path(path_text):
+        categories.add("java-high-risk")
+    elif is_java_path(path_text):
+        categories.add("java")
+    if is_react_high_risk_path(path_text):
+        categories.add("react-high-risk")
+    elif is_react_path(path_text):
+        categories.add("react-web")
+    return categories
 
 
 def infer_modules(paths: list[str]) -> list[str]:
@@ -148,6 +393,7 @@ def needs_full_workflow(
         or len(modules) > 1
         or bool(outside_repo_paths)
         or {"dependencies", "config", "schema"} & path_categories
+        or HIGH_RISK_PATH_CATEGORIES & path_categories
     )
 
 
@@ -163,6 +409,18 @@ def validation_expectations(path_categories: set[str], args: argparse.Namespace,
         expectations.append("验证默认值、环境变量和配置加载顺序，不接受静默回退。")
     if "schema" in path_categories or args.schema_change:
         expectations.append("确认迁移/模式变更的前向兼容、回滚路径和历史数据边界。")
+    if "harmony-high-risk" in path_categories:
+        expectations.append("Harmony 高风险改动先做源码级最小路径检查；命中页面结构、resources、module.json5 或 Hvigor/oh-package/build-profile 时，倾向补一次模块级 hvigor 编译验证。")
+    elif "harmony" in path_categories:
+        expectations.append("Harmony 小范围改动优先做源码级或手工最小路径验证，不默认升级到 hvigor 编译。")
+    if "java-high-risk" in path_categories:
+        expectations.append("Java 高风险改动优先执行受影响模块的 ./gradlew test 或 mvn test；controller/API/DTO/migration/config 变更需覆盖契约和数据边界。")
+    elif "java" in path_categories:
+        expectations.append("Java 源码改动优先执行受影响模块的 ./gradlew test 或 mvn test。")
+    if "react-high-risk" in path_categories:
+        expectations.append("React Web 高风险改动优先运行相关 package scripts 的 test、lint、typecheck；路由、SSR/data loading、schema、design-system、package/lockfile 变更按风险补 build。")
+    elif "react-web" in path_categories:
+        expectations.append("React Web 改动优先运行相关 package scripts 的 test、lint 或 typecheck，必要时补 build。")
     if args.performance_sensitive:
         expectations.append("补充关键路径性能或资源使用对比，避免只看功能是否可运行。")
     if args.security_sensitive:
@@ -188,6 +446,12 @@ def review_focus(path_categories: set[str], args: argparse.Namespace, outside_re
         items.append("确认修复的是根因而不是表象，并验证失败路径。")
     if "config" in path_categories:
         items.append("检查配置默认值、环境差异和旧环境兼容性。")
+    if "harmony-high-risk" in path_categories:
+        items.append("复查 ArkTS 页面结构、资源引用、module.json5 与构建配置是否同步。")
+    if "java-high-risk" in path_categories:
+        items.append("复查 Java controller/API/DTO/config/migration 的契约漂移和兼容性。")
+    if "react-high-risk" in path_categories:
+        items.append("复查 React routing、SSR/data loading、API client/auth/schema/design-system 与 package 变更的回归面。")
     if outside_repo_paths:
         items.append("复查仓库外路径是否只是引用信息，还是意味着任务边界需要重新定义。")
     if not items:
@@ -216,7 +480,9 @@ def build_plan(repo: Path, args: argparse.Namespace) -> dict:
     normalized_paths = [normalize_relpath(repo, raw_path) for raw_path in args.paths]
     paths = [item[0] for item in normalized_paths]
     outside_repo_paths = [path_text for path_text, outside_repo in normalized_paths if outside_repo]
-    path_categories = {categorize_path(path_text) for path_text in paths} if paths else set()
+    path_categories = set()
+    for path_text in paths:
+        path_categories.update(classify_path(path_text))
     modules = infer_modules(paths)
     full_mode = needs_full_workflow(path_categories, modules, args, len(paths), outside_repo_paths)
     stages = ["research"]

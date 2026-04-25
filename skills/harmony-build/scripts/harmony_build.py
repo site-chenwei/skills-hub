@@ -41,6 +41,14 @@ ENV_FAILURE_MARKERS = (
     "Permission denied",
     "not executable",
 )
+VERSION_PROBES = {
+    "node": ("node_path", ("--version",)),
+    "java": ("java_path", ("-version",)),
+    "ohpm": ("ohpm_path", ("--version",)),
+    "hdc": ("hdc_path", ("-v",)),
+}
+SDK_COMPONENT_MARKERS = ("ets", "js", "native", "toolchains", "kits", "api")
+MODULE_CONFIG_FILES = {"build-profile.json5", "oh-package.json5", "hvigorfile.ts", "hvigorfile.js"}
 
 
 def strip_ansi(text: str) -> str:
@@ -74,6 +82,25 @@ def unique_values(values):
         seen.add(normalized)
         result.append(normalized)
     return result
+
+
+def non_empty_lines(text: str, max_lines: int | None = None) -> list[str]:
+    lines = [line for line in strip_ansi(text).splitlines() if line.strip()]
+    if max_lines is not None and len(lines) > max_lines:
+        return lines[-max_lines:]
+    return lines
+
+
+def combine_process_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    parts = []
+    for value in (stdout, stderr):
+        if value is None:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if value.strip():
+            parts.append(value.strip())
+    return "\n".join(parts)
 
 
 def now_iso_utc() -> str:
@@ -182,6 +209,27 @@ def is_executable_file(path: Path) -> bool:
     if os.name == "nt":
         return True
     return os.access(path, os.X_OK)
+
+
+def repo_hvigorw_not_executable(repo: Path) -> bool:
+    wrapper = repo / "hvigorw"
+    return wrapper.exists() and wrapper.is_file() and not is_executable_file(wrapper)
+
+
+def hvigorw_permission_hint(repo: Path) -> str | None:
+    if not repo_hvigorw_not_executable(repo):
+        return None
+    return f"Repo wrapper exists but is not executable: {repo / 'hvigorw'}. Run from the repo root: chmod +x hvigorw"
+
+
+def hvigor_not_executable_message(hvigor_path: str, repo_local: str | None = None) -> str:
+    message = f"hvigor executable is missing or not executable: {hvigor_path}"
+    hvigor = Path(hvigor_path)
+    if hvigor.name == "hvigorw":
+        message += "\nRun from the repo root: chmod +x hvigorw"
+    elif repo_local and (Path(repo_local) / "hvigorw").exists():
+        message += "\nIf the repo wrapper is present, run from the repo root: chmod +x hvigorw"
+    return message
 
 
 def is_cached_detection_usable(result: dict | None, repo_info: dict) -> tuple[bool, str | None]:
@@ -358,13 +406,50 @@ def candidate_java_paths() -> list[str]:
     return unique_values(str(path.resolve()) for path in candidates if path.exists())
 
 
+def macos_java_home_helper_path() -> Path:
+    return Path("/usr/libexec/java_home")
+
+
+def macos_java_home_helper_exists() -> bool:
+    return macos_java_home_helper_path().exists()
+
+
+def resolve_macos_java_home() -> str | None:
+    if RUNTIME != "macos":
+        return None
+    helper = macos_java_home_helper_path()
+    if not macos_java_home_helper_exists():
+        return None
+    try:
+        result = subprocess.run(
+            [str(helper)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    java_home = result.stdout.strip().splitlines()
+    return java_home[0].strip() if java_home and java_home[0].strip() else None
+
+
 def java_home_from_path(java_path: str | None) -> str | None:
+    explicit_java_home = os.environ.get("JAVA_HOME")
+    if explicit_java_home:
+        return explicit_java_home
     if not java_path:
-        return os.environ.get("JAVA_HOME")
+        return None
+    if RUNTIME == "macos" and Path(java_path).as_posix() == "/usr/bin/java":
+        return resolve_macos_java_home()
     path = Path(java_path)
     if path.parent.name == "bin":
         return str(path.parent.parent)
-    return os.environ.get("JAVA_HOME")
+    return None
 
 
 def resolve_java() -> tuple[str | None, str | None, list[str]]:
@@ -376,9 +461,8 @@ def resolve_java() -> tuple[str | None, str | None, list[str]]:
 def looks_like_sdk_root(path: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
-    marker_dirs = {"ets", "js", "native", "toolchains", "kits", "api"}
     child_names = {child.name for child in path.iterdir() if child.is_dir()}
-    return bool(marker_dirs & child_names)
+    return bool(set(SDK_COMPONENT_MARKERS) & child_names)
 
 
 def candidate_sdk_roots() -> list[str]:
@@ -445,6 +529,8 @@ def candidate_hvigor_paths(repo: Path) -> list[str]:
 
 def resolve_hvigor_path(repo: Path) -> tuple[str | None, list[str], str | None]:
     candidates = candidate_hvigor_paths(repo)
+    if repo_hvigorw_not_executable(repo):
+        return None, candidates, "repo-wrapper-not-executable"
     for item in candidates:
         path = Path(item)
         if is_executable_file(path):
@@ -456,6 +542,296 @@ def resolve_hvigor_path(repo: Path) -> tuple[str | None, list[str], str | None]:
 def resolve_optional_tool(command_name: str) -> tuple[str | None, list[str]]:
     candidates = which_all(command_name)
     return (candidates[0] if candidates else None), candidates
+
+
+def run_short_command(args: list[str], timeout_seconds: int = 10) -> dict:
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        return {
+            "success": False,
+            "exit_code": 124,
+            "output": combine_process_output(error.stdout, error.stderr),
+            "timed_out": True,
+        }
+    except OSError as error:
+        return {
+            "success": False,
+            "exit_code": getattr(error, "errno", 1) or 1,
+            "output": str(error),
+            "timed_out": False,
+        }
+
+    return {
+        "success": result.returncode == 0,
+        "exit_code": result.returncode,
+        "output": combine_process_output(result.stdout, result.stderr),
+        "timed_out": False,
+    }
+
+
+def probe_tool_version(name: str, path_text: str | None, version_args: tuple[str, ...]) -> dict:
+    if not path_text:
+        return {
+            "path": None,
+            "available": False,
+            "version": None,
+            "exit_code": None,
+            "timed_out": False,
+        }
+
+    outcome = run_short_command([path_text, *version_args])
+    return {
+        "path": path_text,
+        "available": outcome["success"],
+        "version": "\n".join(non_empty_lines(outcome["output"], max_lines=4)) or None,
+        "exit_code": outcome["exit_code"],
+        "timed_out": outcome["timed_out"],
+    }
+
+
+def collect_tool_versions(resolved: dict) -> dict:
+    versions = {}
+    for name, (path_key, args) in VERSION_PROBES.items():
+        versions[name] = probe_tool_version(name, resolved.get(path_key), args)
+    return versions
+
+
+def collect_macos_java_home_verbose() -> dict:
+    if RUNTIME != "macos":
+        return {
+            "available": False,
+            "reason": "non_macos_runtime",
+            "summary": [],
+        }
+
+    helper = macos_java_home_helper_path()
+    if not macos_java_home_helper_exists():
+        return {
+            "available": False,
+            "reason": "helper_missing",
+            "summary": [],
+        }
+
+    outcome = run_short_command([str(helper), "-V"])
+    return {
+        "available": outcome["success"],
+        "exit_code": outcome["exit_code"],
+        "timed_out": outcome["timed_out"],
+        "summary": non_empty_lines(outcome["output"], max_lines=12),
+    }
+
+
+def sdk_api_from_path(path: Path) -> str | None:
+    name = path.name
+    if re.fullmatch(r"\d+(?:\.\d+)?", name):
+        return name
+    return None
+
+
+def describe_sdk_root(path_text: str) -> dict:
+    path = Path(path_text).expanduser()
+    entry = {
+        "path": path_text,
+        "exists": path.exists(),
+        "api": sdk_api_from_path(path),
+        "components": [],
+    }
+    if not path.exists() or not path.is_dir():
+        return entry
+
+    child_names = {child.name for child in path.iterdir() if child.is_dir()}
+    entry["components"] = [name for name in SDK_COMPONENT_MARKERS if name in child_names]
+    return entry
+
+
+def collect_sdk_diagnostics(sdk_home: str | None, sdk_candidates: list[str]) -> dict:
+    candidate_paths = unique_values([sdk_home, *sdk_candidates])
+    return {
+        "selected": sdk_home,
+        "candidates": [describe_sdk_root(path) for path in candidate_paths],
+    }
+
+
+def build_doctor_report_from_detection(detection: dict) -> dict:
+    resolved = detection.get("resolved") or {}
+    candidates = detection.get("candidates") or {}
+    return {
+        "tools": collect_tool_versions(resolved),
+        "macos_java_home": collect_macos_java_home_verbose(),
+        "sdk": collect_sdk_diagnostics(resolved.get("sdk_home"), candidates.get("sdk_home") or []),
+        "deveco": {
+            "selected": resolved.get("deveco_app"),
+            "candidates": candidates.get("deveco_app") or [],
+        },
+    }
+
+
+def build_doctor_report(repo_arg: str | None) -> dict:
+    detection = detect_environment_for_repo(resolve_repo_paths(repo_arg), preflight=False)
+    return {
+        "detection": detection,
+        "doctor": build_doctor_report_from_detection(detection),
+    }
+
+
+def print_tool_version(name: str, info: dict) -> None:
+    path_text = info.get("path") or "NOT FOUND"
+    print(f"{name}: {path_text}")
+    version = info.get("version")
+    if version:
+        for line in version.splitlines():
+            print(f"  {line}")
+    elif info.get("exit_code") is not None:
+        print(f"  version probe failed with exit code {info['exit_code']}")
+
+
+def print_doctor_report(report: dict) -> None:
+    print("Doctor:")
+    tools = report.get("tools") or {}
+    for name in ("node", "java", "ohpm", "hdc"):
+        print_tool_version(name, tools.get(name) or {})
+
+    java_home = report.get("macos_java_home") or {}
+    print("macOS java_home -V:")
+    if java_home.get("summary"):
+        for line in java_home["summary"]:
+            print(f"  {line}")
+    else:
+        print(f"  {java_home.get('reason') or 'NOT AVAILABLE'}")
+
+    sdk = report.get("sdk") or {}
+    print(f"Harmony SDK selected: {sdk.get('selected') or 'NOT FOUND'}")
+    for candidate in sdk.get("candidates") or []:
+        parts = [candidate["path"]]
+        if candidate.get("api"):
+            parts.append(f"api={candidate['api']}")
+        if candidate.get("components"):
+            parts.append(f"components={','.join(candidate['components'])}")
+        if not candidate.get("exists"):
+            parts.append("missing")
+        print(f"  {'; '.join(parts)}")
+
+    deveco = report.get("deveco") or {}
+    print(f"DevEco Studio selected: {deveco.get('selected') or 'NOT FOUND'}")
+    for candidate in deveco.get("candidates") or []:
+        print(f"  {candidate}")
+
+
+def normalize_changed_path(repo: Path, path_text: str) -> tuple[str, list[str]]:
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        try:
+            display = str(path.resolve().relative_to(repo.resolve()))
+        except ValueError:
+            display = str(path)
+    else:
+        display = str(path)
+    parts = [part for part in Path(display).parts if part not in ("", os.sep)]
+    return display.replace("\\", "/"), parts
+
+
+def module_from_path_parts(parts: list[str]) -> str | None:
+    if "src" in parts:
+        index = parts.index("src")
+        if index > 0:
+            return parts[index - 1]
+    if parts and parts[-1] in MODULE_CONFIG_FILES and len(parts) > 1:
+        return parts[-2]
+    return None
+
+
+def classify_changed_path(parts: list[str]) -> str:
+    lowered = [part.lower() for part in parts]
+    file_name = lowered[-1] if lowered else ""
+    if "ets" in lowered or file_name.endswith(".ets"):
+        return "ets"
+    if "resources" in lowered or "resource" in lowered:
+        return "resources"
+    if file_name in MODULE_CONFIG_FILES:
+        return "module_config" if len(parts) > 1 else "project_config"
+    return "unknown"
+
+
+def recommendation_for_path(repo: Path, path_text: str) -> dict:
+    display, parts = normalize_changed_path(repo, path_text)
+    module = module_from_path_parts(parts)
+    kind = classify_changed_path(parts)
+
+    if kind in {"ets", "resources"} and module:
+        return {
+            "path": display,
+            "kind": kind,
+            "module": module,
+            "task_template": f":{module}:assembleHap",
+            "confidence": "template",
+            "requires_task_listing": False,
+            "reason": "页面、ArkTS 或资源改动通常优先选择对应模块级公开 hvigor 任务；实际任务名需以项目 tasks 列表为准。",
+        }
+
+    if kind == "module_config" and module:
+        return {
+            "path": display,
+            "kind": kind,
+            "module": module,
+            "task_template": f":{module}:assembleHap",
+            "confidence": "template",
+            "requires_task_listing": False,
+            "reason": "模块构建配置或依赖文件变更，优先选择模块级或构建相关公开 hvigor 任务模板。",
+        }
+
+    if kind == "project_config":
+        return {
+            "path": display,
+            "kind": kind,
+            "module": None,
+            "task_template": "<project-level public build task from hvigor tasks>",
+            "confidence": "template",
+            "requires_task_listing": False,
+            "reason": "项目级构建配置变更影响范围可能跨模块，只能给出构建相关任务模板。",
+        }
+
+    return {
+        "path": display,
+        "kind": kind,
+        "module": module,
+        "task_template": None,
+        "confidence": "unknown",
+        "requires_task_listing": True,
+        "reason": "未识别到可稳定映射的 Harmony 页面、资源或构建配置路径；需先列出公开 hvigor tasks 再选择任务。",
+    }
+
+
+def recommend_tasks_for_paths(repo_arg: str | None, paths: list[str]) -> dict:
+    repo_info = resolve_repo_paths(repo_arg)
+    repo = Path(repo_info["local_path"])
+    recommendations = [recommendation_for_path(repo, path) for path in paths]
+    return {
+        "repo": repo_info,
+        "recommendations": recommendations,
+        "needs_list_tasks": any(item["requires_task_listing"] for item in recommendations),
+        "list_tasks_hint": "Run `hvigor tasks` or this skill's list-tasks flow before treating templates as exact task names.",
+    }
+
+
+def print_task_recommendations(result: dict) -> None:
+    print("Task recommendations:")
+    for item in result.get("recommendations") or []:
+        template = item.get("task_template") or "LIST TASKS FIRST"
+        module = item.get("module") or "project"
+        print(f"- {item['path']}: {template}")
+        print(f"  module: {module}; kind: {item['kind']}; confidence: {item['confidence']}")
+        print(f"  reason: {item['reason']}")
+    if result.get("needs_list_tasks"):
+        print(result["list_tasks_hint"])
 
 
 def validate_hvigor_task(task: str) -> str | None:
@@ -546,7 +922,7 @@ def run_hvigor_task(
         return {
             "success": False,
             "exit_code": 126,
-            "output": f"hvigor executable is missing or not executable: {hvigor_path}",
+            "output": hvigor_not_executable_message(hvigor_path, repo_local),
             "timed_out": False,
         }
 
@@ -664,6 +1040,7 @@ def detect_environment_for_repo(
         ready = preflight_result["success"]
 
     blockers = []
+    blocker_details = {}
     if not repo_info["local_exists"]:
         blockers.append("repo_missing")
     if not project_markers:
@@ -674,6 +1051,9 @@ def detect_environment_for_repo(
         blockers.append("sdk_missing")
     if not hvigor_path:
         blockers.append("hvigor_missing_or_not_executable")
+        hint = hvigorw_permission_hint(repo)
+        if hint:
+            blocker_details["hvigor_missing_or_not_executable"] = hint
     if preflight and preflight_result and not preflight_result["success"]:
         blockers.append("hvigor_preflight_failed")
 
@@ -712,6 +1092,7 @@ def detect_environment_for_repo(
         },
         "preflight": preflight_result,
         "blockers": blockers,
+        "blocker_details": blocker_details,
     }
 
 
@@ -762,6 +1143,7 @@ def print_detection(result: dict) -> None:
     cache = result.get("cache") or {}
     project = result.get("project") or {}
     preflight = result.get("preflight") or {}
+    blocker_details = result.get("blocker_details") or {}
 
     print(f"Runtime host: {result['runtime']['host']}")
     print(f"Repo input: {repo['input']}")
@@ -784,6 +1166,10 @@ def print_detection(result: dict) -> None:
             print(summarize_output(preflight["output"]))
     if result.get("blockers"):
         print(f"Blockers: {', '.join(result['blockers'])}")
+        for blocker in result["blockers"]:
+            detail = blocker_details.get(blocker)
+            if detail:
+                print(f"  - {detail}")
     if cache:
         print(f"Detection source: {cache['source']}")
         print(f"Environment cache saved: {'yes' if cache.get('saved') else 'no'}")
@@ -874,6 +1260,45 @@ def build_parser() -> argparse.ArgumentParser:
         dest="skip_preflight",
         help=argparse.SUPPRESS,
     )
+    detect_parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Include version probes, macOS java_home -V summary, SDK components, and DevEco candidates.",
+    )
+    detect_parser.add_argument(
+        "--recommend-task",
+        action="store_true",
+        help="Print hvigor task templates for changed paths without running hvigor.",
+    )
+    detect_parser.add_argument(
+        "--paths",
+        nargs="+",
+        help="Changed paths used with --recommend-task.",
+    )
+
+    doctor_parser = subparsers.add_parser("doctor", help="Collect diagnostic details without running hvigor.")
+    doctor_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+
+    recommend_parser = subparsers.add_parser("recommend-task", help="Recommend minimal hvigor task templates for changed paths.")
+    recommend_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    recommend_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    recommend_parser.add_argument("paths", nargs="+", help="Changed files or directories.")
+
+    list_tasks_parser = subparsers.add_parser("list-tasks", help="Run the public hvigor tasks listing flow.")
+    list_tasks_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    list_tasks_parser.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HVIGOR_TASK_TIMEOUT_SECONDS,
+        help=f"Hard timeout for the hvigor process wrapper. Defaults to {HVIGOR_TASK_TIMEOUT_SECONDS}.",
+    )
+    list_tasks_parser.add_argument("--json", action="store_true", help="Print detection result and tasks outcome as JSON.")
+    list_tasks_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ignore cached ready baselines and rerun detection before listing tasks.",
+    )
 
     verify_parser = subparsers.add_parser("verify", help="Run a public hvigor task with the detected macOS environment.")
     verify_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
@@ -914,11 +1339,68 @@ def main() -> int:
                 refresh=args.refresh,
                 allow_cache=preflight,
             )
+            doctor_report = build_doctor_report_from_detection(result) if args.doctor else None
+            task_recommendations = None
+            if args.recommend_task:
+                if not args.paths:
+                    raise RuntimeError("--recommend-task requires --paths")
+                task_recommendations = recommend_tasks_for_paths(args.repo, args.paths)
+            if args.json:
+                payload = dict(result)
+                if doctor_report is not None:
+                    payload["doctor"] = doctor_report
+                if task_recommendations is not None:
+                    payload["task_recommendations"] = task_recommendations
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print_detection(result)
+                if doctor_report is not None:
+                    print_doctor_report(doctor_report)
+                if task_recommendations is not None:
+                    print_task_recommendations(task_recommendations)
+            return 0 if result["ready"] else 1
+
+        if args.command == "doctor":
+            report = build_doctor_report(args.repo)
+            if args.json:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print_detection(report["detection"])
+                print_doctor_report(report["doctor"])
+            return 0
+
+        if args.command == "recommend-task":
+            result = recommend_tasks_for_paths(args.repo, args.paths)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
-                print_detection(result)
-            return 0 if result["ready"] else 1
+                print_task_recommendations(result)
+            return 0 if not result["needs_list_tasks"] else 1
+
+        if args.command == "list-tasks":
+            result = resolve_verification_detection(
+                args.repo,
+                refresh=args.refresh,
+            )
+            outcome = verify_task(result, "tasks", args.timeout_seconds)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "detection": result,
+                            "task": "tasks",
+                            "verification": outcome,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                if not result["ready"]:
+                    print_detection(result)
+                if outcome["output"]:
+                    print(outcome["output"])
+            return outcome["exit_code"]
 
         if args.command == "verify":
             result = resolve_verification_detection(

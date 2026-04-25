@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,6 +92,227 @@ class ChangePlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertIn("project-onboarding", plan["recommended_skill_chain"])
         self.assertTrue(any("仓库边界" in item for item in plan["validation_expectations"]))
+
+    def test_build_plan_promotes_harmony_high_risk_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "entry" / "src" / "main" / "ets" / "pages").mkdir(parents=True)
+            (repo / "entry" / "src" / "main" / "resources" / "base").mkdir(parents=True)
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 Harmony 页面结构",
+                paths=[
+                    "entry/src/main/ets/pages/Index.ets",
+                    "entry/src/main/module.json5",
+                    "entry/src/main/resources/base/element/string.json",
+                ],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("harmony-high-risk", plan["path_categories"])
+        self.assertTrue(any("模块级 hvigor 编译验证" in item for item in plan["validation_expectations"]))
+        self.assertTrue(any("module.json5" in item for item in plan["review_focus"]))
+
+    def test_build_plan_promotes_java_high_risk_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "src" / "main" / "java" / "com" / "example" / "user").mkdir(parents=True)
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 Java API",
+                paths=[
+                    "src/main/java/com/example/user/UserController.java",
+                    "src/main/java/com/example/user/UserDto.java",
+                    "src/main/resources/application.yml",
+                    "pom.xml",
+                ],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("java-high-risk", plan["path_categories"])
+        self.assertTrue(any("./gradlew test 或 mvn test" in item for item in plan["validation_expectations"]))
+        self.assertTrue(any("controller/API/DTO/config/migration" in item for item in plan["review_focus"]))
+
+    def test_build_plan_keeps_non_react_auth_ts_out_of_react_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "src").mkdir()
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 Node 鉴权工具",
+                paths=["src/auth.ts"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=True,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertIn("source", plan["path_categories"])
+        self.assertNotIn("react-high-risk", plan["path_categories"])
+        self.assertNotIn("react-web", plan["path_categories"])
+        self.assertTrue(any("权限边界" in item for item in plan["validation_expectations"]))
+        self.assertFalse(any("React Web" in item for item in plan["validation_expectations"]))
+
+    def test_build_plan_promotes_react_auth_with_stack_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "web" / "src").mkdir(parents=True)
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 React 鉴权",
+                paths=["web/src/auth.ts"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("react-high-risk", plan["path_categories"])
+        self.assertTrue(any("React Web 高风险" in item for item in plan["validation_expectations"]))
+
+    def test_build_plan_promotes_react_web_high_risk_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "src" / "routes").mkdir(parents=True)
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 React 路由",
+                paths=[
+                    "src/routes/account.tsx",
+                    "src/api-client/auth.ts",
+                    "package.json",
+                ],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("react-high-risk", plan["path_categories"])
+        self.assertTrue(any("test、lint、typecheck" in item for item in plan["validation_expectations"]))
+        self.assertTrue(any("routing、SSR/data loading" in item for item in plan["review_focus"]))
+
+    def test_build_plan_keeps_plain_harmony_ets_util_low_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "entry" / "src" / "main" / "ets" / "utils").mkdir(parents=True)
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 ArkTS 格式化工具",
+                paths=["entry/src/main/ets/utils/format.ets"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["mode"], "light")
+        self.assertIn("harmony", plan["path_categories"])
+        self.assertNotIn("harmony-high-risk", plan["path_categories"])
+        self.assertTrue(any("不默认升级到 hvigor 编译" in item for item in plan["validation_expectations"]))
+        self.assertFalse(any("模块级 hvigor 编译验证" in item for item in plan["validation_expectations"]))
+
+    def test_build_plan_keeps_non_react_package_json_as_dependency_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "package.json").write_text('{"name":"python-tools"}\n', encoding="utf-8")
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="更新工具依赖",
+                paths=["package.json"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertIn("dependencies", plan["path_categories"])
+        self.assertNotIn("react-high-risk", plan["path_categories"])
+        self.assertNotIn("react-web", plan["path_categories"])
+
+    def test_build_plan_does_not_treat_author_file_as_react_auth_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "src").mkdir()
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整作者信息",
+                paths=["src/author.ts"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["path_categories"], ["source"])
+        self.assertEqual(plan["mode"], "light")
+        self.assertFalse(any("React Web 高风险" in item for item in plan["validation_expectations"]))
+
+    def test_build_plan_treats_windows_absolute_paths_as_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            if os.name != "nt":
+                (repo / "C:" / "tmp").mkdir(parents=True)
+                (repo / "C:" / "tmp" / "file.ts").write_text("export const value = 1;\n", encoding="utf-8")
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="分析外部 Windows 路径",
+                paths=[r"C:\tmp\file.ts"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["outside_repo_paths"], ["C:/tmp/file.ts"])
+        self.assertEqual(plan["modules"], ["(outside repo)"])
+        self.assertEqual(plan["mode"], "full")
 
 
 if __name__ == "__main__":

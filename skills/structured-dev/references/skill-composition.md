@@ -4,6 +4,7 @@
 
 - 仓库陌生、影响面不清、涉及多个模块或多个技术栈
 - 需要先确认最小验证命令、关键入口、约束和边界
+- 需要判断 Harmony、Java、React Web 的入口、风险信号和验证候选
 
 ## 先串联 `verification-and-debug`
 
@@ -14,8 +15,10 @@
 
 - 改动跨文件、涉及契约、依赖、schema、配置或高风险逻辑
 - 需要独立视角复查回归、测试缺口和交付风险
+- Harmony 页面结构 / 资源 / 构建配置、Java API / DTO / migration / config、React routing / SSR / auth / schema / design-system 等高风险路径
 
 ## 不必强行串联
 
 - 单文件、小修复、边界明确且验证简单
 - 额外串联不会新增判断价值，只会重复已有事实
+- Harmony 小范围文案、样式或局部业务逻辑改动如果已有更小验证覆盖，不因项目类型强制串联 `harmony-build`

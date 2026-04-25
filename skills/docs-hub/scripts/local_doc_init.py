@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
-from importlib import metadata as importlib_metadata
 import json
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -19,6 +17,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from _bootstrap import (  # noqa: E402
     REQUIREMENTS_FILE,
+    current_python_version,
+    dependency_cache_problem,
     format_python_command,
     init_state_path,
     load_init_state,
@@ -29,9 +29,6 @@ from _bootstrap import (  # noqa: E402
     skill_root,
     write_json_atomic,
 )
-
-
-_REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 
 
 def deps_site_packages(root: Path) -> Path:
@@ -46,11 +43,6 @@ def install_requirements(site_packages: Path, req_path: Path) -> str:
             check=True,
         )
         return "uv"
-
-    pip = shutil.which("pip3") or shutil.which("pip")
-    if pip:
-        subprocess.run([pip, "install", "--upgrade", "--target", str(site_packages), "-r", str(req_path)], check=True)
-        return "pip"
 
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "--target", str(site_packages), "-r", str(req_path)],
@@ -89,50 +81,14 @@ def install_requirements_atomic(root: Path, req_path: Path) -> tuple[Path, str]:
         return final_target, installer
 
 
-def normalize_distribution_name(name: str) -> str:
-    return name.strip().replace("_", "-").casefold()
-
-
-def required_distribution_names(req_path: Path) -> set[str]:
-    required: set[str] = set()
-    for raw_line in req_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
-            continue
-        match = _REQ_NAME_RE.match(line)
-        if not match:
-            continue
-        required.add(normalize_distribution_name(match.group(1)))
-    return required
-
-
-def installed_distribution_names(site_packages: Path) -> set[str]:
-    names: set[str] = set()
-    for dist in importlib_metadata.distributions(path=[str(site_packages)]):
-        raw_name = str(dist.metadata.get("Name") or "").strip()
-        if raw_name:
-            names.add(normalize_distribution_name(raw_name))
-    return names
-
-
-def reuse_existing_site_packages(root: Path, req_path: Path) -> tuple[Path, str] | None:
+def reuse_existing_site_packages(root: Path, _req_path: Path) -> tuple[Path, str] | None:
     state = load_init_state(root)
     if not state:
         return None
-    if str(state.get("requirements_hash") or "") != requirements_hash(root):
-        return None
-    if str(state.get("python_version") or "") != ".".join(str(part) for part in sys.version_info[:3]):
+    if dependency_cache_problem(state, root):
         return None
 
-    site_packages = Path(str(state.get("site_packages") or ""))
-    if not site_packages.exists():
-        return None
-
-    required = required_distribution_names(req_path)
-    installed = installed_distribution_names(site_packages)
-    if not required or not required.issubset(installed):
-        return None
-
+    site_packages = Path(str(state["site_packages"]))
     installer = str(state.get("installer") or "cached")
     return site_packages, installer
 
@@ -233,9 +189,6 @@ def main() -> None:
         site_packages, installer = install_requirements_atomic(runtime_dir, req_path)
     activate_site_packages(site_packages)
 
-    build_module = load_build_module()
-    defaults, actions = detect_index_actions(hub_root, build_module)
-    build_required_indexes(hub_root, defaults, actions, build_module)
     state = {
         "initialized_at": datetime.now(timezone.utc).isoformat(),
         "skill_root": str(root),
@@ -246,8 +199,15 @@ def main() -> None:
         "runtime_root": str(runtime_dir),
         "requirements_file": REQUIREMENTS_FILE,
         "requirements_hash": requirements_hash(root),
-        "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+        "python_version": current_python_version(),
     }
+    problem = dependency_cache_problem(state, root)
+    if problem:
+        raise SystemExit(f"[error] skill 依赖缓存校验失败: {problem}")
+
+    build_module = load_build_module()
+    defaults, actions = detect_index_actions(hub_root, build_module)
+    build_required_indexes(hub_root, defaults, actions, build_module)
     state_path = init_state_path(root)
     write_json_atomic(state_path, state)
     print(f"[init] 完成: {state_path}")

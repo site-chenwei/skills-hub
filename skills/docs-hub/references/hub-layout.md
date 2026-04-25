@@ -66,6 +66,8 @@ Refresh only on explicit user request:
 - The skill keeps its runtime `.deps/` and init state in a user-local cache directory outside the synced skill bundle; do not write initialization state into the external hub.
 - By default that runtime directory follows the shared `skills-hub/<skill-name>` convention; `SKILLS_HUB_RUNTIME_DIR` overrides the shared root.
 - Running `init` refreshes that local runtime cache and rebuilds indexes that are missing or stale for the current build logic.
-- A repeated `init` reuses the local runtime dependency cache when the requirements hash and Python version still match; pass `--refresh-deps` only when you need to force a reinstall.
+- Dependency installation uses `uv pip install --python <current-python>` when `uv` is available, otherwise `<current-python> -m pip`, so PATH-level `pip3` from another Python is not reused accidentally.
+- A repeated `init` reuses the local runtime dependency cache only when the requirements hash, Python version/interpreter, site-packages directory, and required distributions still match; pass `--refresh-deps` only when you need to force a reinstall.
+- `search`, `refresh`, and `reinit` validate the same init state before activating cached dependencies. If the Python version or dependency cache no longer matches, rerun `$docs-hub init`.
 - Large docsets may still override `chunk` at the docset level to trade index size/build time against retrieval granularity.
 - Incremental build now prefers a fast stat-based skip (`mtime_ns + ctime_ns + size`) and falls back to sha256 when metadata is not conclusive.

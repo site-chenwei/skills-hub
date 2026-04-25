@@ -25,18 +25,13 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from _bootstrap import runtime_root  # noqa: E402
 from _common import DependencyMissingError, parse_front_matter  # noqa: E402
 from build_docset_index import compute_build_signature, maybe_vacuum, merge_config  # noqa: E402
-
-
-_REAL_SUBPROCESS_RUN = subprocess.run
+from local_doc_init import install_requirements  # noqa: E402
 
 
 def run_subprocess(*args, **kwargs):
     kwargs.setdefault("encoding", "utf-8")
     kwargs.setdefault("errors", "replace")
-    return _REAL_SUBPROCESS_RUN(*args, **kwargs)
-
-
-subprocess.run = run_subprocess
+    return subprocess.run(*args, **kwargs)
 
 
 def copy_skill_tree(src: Path, dst: Path) -> None:
@@ -126,6 +121,29 @@ class DocsHubCommonTest(unittest.TestCase):
         self.assertTrue(stats["vacuumed"])
         self.assertLess(after, before)
 
+    def test_install_requirements_uses_current_interpreter_pip_without_uv(self) -> None:
+        with (
+            mock.patch("local_doc_init.shutil.which", return_value=None),
+            mock.patch("local_doc_init.subprocess.run") as run_mock,
+        ):
+            installer = install_requirements(Path("site-packages"), Path("requirements.txt"))
+
+        run_mock.assert_called_once_with(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--target",
+                "site-packages",
+                "-r",
+                "requirements.txt",
+            ],
+            check=True,
+        )
+        self.assertEqual("python -m pip", installer)
+
 
 class DocsHubLayoutTest(unittest.TestCase):
     def test_skill_bundle_contains_required_entries(self) -> None:
@@ -175,7 +193,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(cls.shared_hub_root)],
             check=True,
             capture_output=True,
@@ -204,7 +222,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
     def ensure_repo_skill_initialized(self) -> None:
         if self._repo_skill_initialized:
             return
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(self.shared_hub_root)],
             check=True,
             capture_output=True,
@@ -261,7 +279,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
 
     def run_build(self, hub_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         self.ensure_repo_skill_initialized()
-        return subprocess.run(
+        return run_subprocess(
             [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "testset", *args],
             check=True,
             capture_output=True,
@@ -271,7 +289,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
 
     def run_search(self, hub_root: Path, *args: str) -> list[dict]:
         self.ensure_repo_skill_initialized()
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), *args, "--json"],
             check=True,
             capture_output=True,
@@ -309,7 +327,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             """,
         )
         self.run_build(hub_root)
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "hello", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,
@@ -1006,7 +1024,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         )
         (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
             check=True,
             capture_output=True,
@@ -1024,7 +1042,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
     def test_init_fails_without_resolvable_hub_root(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT)],
             check=False,
             cwd=tmpdir.name,
@@ -1041,7 +1059,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         invalid_root = Path(tmpdir.name) / "not-a-hub"
         invalid_root.mkdir(parents=True, exist_ok=True)
         valid_hub = self.make_hub()
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(INIT_SCRIPT), "--skill-root", str(SKILL_ROOT), "--hub-root", str(invalid_root)],
             check=False,
             capture_output=True,
@@ -1073,7 +1091,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             content for auto build
             """,
         )
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
@@ -1112,7 +1130,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             encoding="utf-8",
         )
 
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=False,
             capture_output=True,
@@ -1133,7 +1151,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         stale_file.write_text("stale = True\n", encoding="utf-8")
 
         hub_root = self.make_hub()
-        subprocess.run(
+        run_subprocess(
             [
                 PYTHON,
                 str(isolated_skill_root / "scripts" / "local_doc_init.py"),
@@ -1158,7 +1176,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         copy_skill_tree(SKILL_ROOT, isolated_skill_root)
         hub_root = self.make_hub()
 
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
@@ -1168,7 +1186,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         sentinel = self.runtime_path(".deps", "site-packages", "cache-sentinel.txt")
         sentinel.write_text("reuse me\n", encoding="utf-8")
 
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
@@ -1178,6 +1196,39 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
 
         self.assertIn("复用已有 skill 依赖", proc.stdout)
         self.assertTrue(sentinel.exists())
+
+    def test_init_reinstalls_when_python_version_cache_is_stale(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        isolated_skill_root = Path(tmpdir.name) / "docs-hub"
+        copy_skill_tree(SKILL_ROOT, isolated_skill_root)
+        hub_root = self.make_hub()
+
+        run_subprocess(
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+        sentinel = self.runtime_path(".deps", "site-packages", "cache-sentinel.txt")
+        sentinel.write_text("stale python cache\n", encoding="utf-8")
+        state_path = self.runtime_path(".skill-init.json")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["python_version"] = "0.0.0"
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        proc = run_subprocess(
+            [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertIn("安装 skill 依赖", proc.stdout)
+        self.assertNotIn("复用已有 skill 依赖", proc.stdout)
+        self.assertFalse(sentinel.exists())
 
     def test_init_rebuilds_stale_indexes(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
@@ -1209,7 +1260,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         expected_signature = compute_build_signature(merge_config(cfg["defaults"], cfg["docsets"][0]))
 
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
@@ -1249,7 +1300,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(workspace_root)],
             check=True,
             capture_output=True,
@@ -1268,7 +1319,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         if init_state.exists():
             init_state.unlink()
         hub_root = self.make_hub()
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "--hub-root", str(hub_root), "输入法"],
             check=False,
             capture_output=True,
@@ -1277,6 +1328,25 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         )
         self.assertNotEqual(0, proc.returncode)
         self.assertIn("$docs-hub init", proc.stderr)
+
+    def test_query_rejects_stale_python_version_init_state(self) -> None:
+        state_path = self.runtime_path(".skill-init.json")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["python_version"] = "0.0.0"
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        hub_root = self.make_hub()
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "anything"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("初始化状态已失效", proc.stderr)
+        self.assertIn("Python 版本不匹配", proc.stderr)
 
     def test_query_prefers_saved_init_hub_root(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
@@ -1300,14 +1370,14 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             reusable content
             """,
         )
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
             text=True,
             env=self.subprocess_env,
         )
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "reusable", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,
@@ -1340,7 +1410,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             original refresh content
             """,
         )
-        subprocess.run(
+        run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "local_doc_init.py"), "--skill-root", str(isolated_skill_root), "--hub-root", str(hub_root)],
             check=True,
             capture_output=True,
@@ -1364,7 +1434,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
-        proc = subprocess.run(
+        proc = run_subprocess(
             [PYTHON, str(isolated_skill_root / "scripts" / "search_docs.py"), "--rebuild-stale", "refreshed", "--docset", "testset", "--json"],
             check=True,
             capture_output=True,

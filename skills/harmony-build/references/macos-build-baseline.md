@@ -23,7 +23,7 @@
   - `oh-package.json5`
   - `AppScope/app.json5`
 - Node 通过 `NODE_HOME`、`PATH` 或常见 Homebrew 路径解析。
-- Java 通过 `JAVA_HOME`、`PATH` 或 `/usr/bin/java` 解析。
+- Java 优先使用显式 `JAVA_HOME`；仅当未设置 `JAVA_HOME` 且候选 Java 是 `/usr/bin/java` 启动器时，才通过 `/usr/libexec/java_home` 解析真实 JDK home，避免把 `/usr/bin/java` 反推成 `/usr`。
 - Harmony SDK 通过以下候选来源解析：
   - `DEVECO_SDK_HOME`
   - `HOS_SDK_HOME`
@@ -63,7 +63,7 @@
 ### `hvigor_missing_or_not_executable`
 
 - 含义：未找到可执行的 `hvigorw` / `hvigor`。
-- 处理：优先检查项目根是否包含 wrapper；如果存在但不可执行，修正文件权限后重试。
+- 处理：优先检查项目根是否包含 wrapper；如果 `hvigorw` 存在但不可执行，先在项目根执行 `chmod +x hvigorw` 后重试。此状态不能视为 ready，即使 PATH 上还有其他 hvigor。
 
 ### `hvigor_preflight_failed`
 

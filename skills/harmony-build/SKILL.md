@@ -16,6 +16,9 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
 - Python 入口统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/harmony_build.py` 的绝对路径。
 - 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
+- `<skill_root>` 只能由本次实际打开的 `SKILL.md` 路径推导；不要根据 Skill 名称、同名目录、`.system`、`builtin`、`installed` 等目录习惯切换到其他路径。
+- 调用 `run.py`、`scripts/`、`references/`、模板或其他附件前，先在 `<skill_root>` 下显式确认目标存在；不存在时报告附件缺失并回退手工流程。
+- 对用户说明使用本 Skill 时，区分已确认入口文件、推导出的根目录和已检查存在的附件。
 - Mac 开发环境优先使用 zsh/bash 片段；`scripts/harmony_build.ps1` 仅是遗留 Windows 包装入口，不作为 Mac 工作流入口。
 
 ## 何时使用
@@ -38,6 +41,7 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - 用户明确要求编译、打包、签名、安装，或要求确认“是否能构建通过”。
   - 你需要给出最终 Mac 本机构建结论。
   - 改动明显进入 hvigor 构建链路。
+  - 改动命中 HarmonyOS / OpenHarmony 高风险 UI 或 ArkTS 结构：页面结构、导航层级、`@Entry`、`HdsNavigation` / `HdsNavDestination` / `HdsTabs`、`NavigationBuilderRegister`、`build()` 根节点、`@Builder` / `@BuilderParam`、公共页面脚手架或资源引用接线，且源码级检查不足以覆盖风险。
   - 更便宜的最小验证不足以覆盖风险，且问题大概率位于构建层。
 - 即使决定进入 `verify`，也优先选择能支撑当前结论的最小公开 hvigor 任务，不要默认使用 `assembleApp`。
 - `verify --task tasks` 只用于用户要求查看任务列表，或你正在排查 hvigor / 环境漂移；它不是构建验证的默认前置步骤。

@@ -1,4 +1,4 @@
 interface:
   display_name: "verification-and-debug"
   short_description: "Capture failures, isolate the broken layer, and verify root-cause fixes."
-  default_prompt: "Use $verification-and-debug to capture the failing command, classify the broken layer, and verify the smallest root-cause fix. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."
+  default_prompt: "Use $verification-and-debug to capture the failing command, classify the broken layer, and verify the smallest root-cause fix without swallowing errors or leaking secrets. When invoking bundled helpers, derive <skill_root> only from the opened SKILL.md path, confirm referenced run.py/scripts/references exist under that root, and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."

@@ -12,6 +12,9 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
 - 所有辅助脚本统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
 - 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
+- `<skill_root>` 只能由本次实际打开的 `SKILL.md` 路径推导；不要根据 Skill 名称、同名目录、`.system`、`builtin`、`installed` 等目录习惯切换到其他路径。
+- 调用 `run.py`、`scripts/`、`references/`、模板或其他附件前，先在 `<skill_root>` 下显式确认目标存在；不存在时报告附件缺失并回退手工流程。
+- 对用户说明使用本 Skill 时，区分已确认入口文件、推导出的根目录和已检查存在的附件。
 
 ## 何时启用
 
@@ -45,6 +48,9 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 - 输出可以折叠，但步骤不能省掉关键判断。
 - 只在确有增量价值时展开背景和解释。
 - 不把多个不确定改动打包在一起。
+- 改动前确认工作区已有变更，不能覆盖、回退或顺手清理用户与其他代理的改动；删除关键文件前先选非破坏路径。
+- 验证强度按主要风险选择，优先静态检查、单测、脚本回归或手工最小路径；只有用户要求、改动进入构建链路、便宜验证不足或已命中高风险条件时，才升级到模块级或整体构建。
+- 不因项目类型或“补验证”机械触发编译；HarmonyOS / OpenHarmony 页面结构、导航、`@Entry`、`HdsNavigation` / `HdsNavDestination` / `HdsTabs`、`NavigationBuilderRegister`、`build()` 根节点、`@Builder` / `@BuilderParam`、公共页面脚手架或资源接线变更，才倾向补模块级 hvigor 验证。
 - 同一问题连续多次修改仍未解决时，要回退并换路径，不连续叠加猜修。
 - 在边界不清时，优先串联 `project-onboarding`；在 bugfix/失败修复任务里，优先串联 `verification-and-debug`；交付前需要独立复查时，串联 `code-review-checklist`。
 

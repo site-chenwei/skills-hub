@@ -1,6 +1,7 @@
 import io
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -154,6 +155,115 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         node_path = str(Path("/opt/homebrew/bin/node"))
         self.assertEqual(HARMONY_BUILD.node_home_from_path(node_path), str(Path(node_path).parent.parent))
 
+    def test_macos_usr_bin_java_uses_libexec_java_home(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(HARMONY_BUILD, "RUNTIME", "macos"),
+            mock.patch.object(HARMONY_BUILD, "resolve_macos_java_home", return_value="/Library/Java/JDK/Contents/Home") as java_home_mock,
+        ):
+            java_home = HARMONY_BUILD.java_home_from_path("/usr/bin/java")
+
+        self.assertEqual(java_home, "/Library/Java/JDK/Contents/Home")
+        java_home_mock.assert_called_once_with()
+
+    def test_macos_explicit_java_home_wins_over_libexec_java_home(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"JAVA_HOME": "/A"}, clear=True),
+            mock.patch.object(HARMONY_BUILD, "RUNTIME", "macos"),
+            mock.patch.object(HARMONY_BUILD, "candidate_java_paths", return_value=["/A/bin/java"]),
+            mock.patch.object(HARMONY_BUILD, "is_executable_file", return_value=True),
+            mock.patch.object(HARMONY_BUILD, "resolve_macos_java_home", return_value="/B") as java_home_mock,
+        ):
+            java_home, java_path, candidates = HARMONY_BUILD.resolve_java()
+
+        self.assertEqual(java_home, "/A")
+        self.assertEqual(java_path, "/A/bin/java")
+        self.assertEqual(candidates, ["/A/bin/java"])
+        java_home_mock.assert_not_called()
+
+    def test_doctor_collects_versions_java_home_verbose_and_sdk_components(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sdk_root = Path(temp_dir) / "Sdk" / "15"
+            (sdk_root / "ets").mkdir(parents=True)
+            (sdk_root / "toolchains").mkdir()
+            detection = {
+                "resolved": {
+                    "node_path": "/tools/node",
+                    "java_path": "/tools/java",
+                    "ohpm_path": "/tools/ohpm",
+                    "hdc_path": "/tools/hdc",
+                    "sdk_home": str(sdk_root),
+                    "deveco_app": "/Applications/DevEco-Studio.app",
+                },
+                "candidates": {
+                    "sdk_home": [str(sdk_root)],
+                    "deveco_app": ["/Applications/DevEco-Studio.app"],
+                },
+            }
+
+            def fake_run(args, **kwargs):
+                self.assertFalse(kwargs.get("check"))
+                self.assertTrue(kwargs.get("capture_output"))
+                java_home_helper = str(HARMONY_BUILD.macos_java_home_helper_path())
+                output = {
+                    ("/tools/node", "--version"): ("v20.11.1\n", ""),
+                    ("/tools/java", "-version"): ("", 'openjdk version "17.0.10"\n'),
+                    ("/tools/ohpm", "--version"): ("5.0.0\n", ""),
+                    ("/tools/hdc", "-v"): ("Ver: 3.1.0\n", ""),
+                    (java_home_helper, "-V"): ("", 'Matching Java Virtual Machines (1):\n17.0.10, x86_64: "JDK 17"\n'),
+                }[tuple(args)]
+                return HARMONY_BUILD.subprocess.CompletedProcess(args, 0, stdout=output[0], stderr=output[1])
+
+            with (
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run) as run_mock,
+                mock.patch.object(HARMONY_BUILD, "RUNTIME", "macos"),
+                mock.patch.object(HARMONY_BUILD, "macos_java_home_helper_exists", return_value=True),
+            ):
+                report = HARMONY_BUILD.build_doctor_report_from_detection(detection)
+
+        self.assertEqual(report["tools"]["node"]["version"], "v20.11.1")
+        self.assertIn('openjdk version "17.0.10"', report["tools"]["java"]["version"])
+        self.assertEqual(report["tools"]["ohpm"]["version"], "5.0.0")
+        self.assertEqual(report["tools"]["hdc"]["version"], "Ver: 3.1.0")
+        self.assertIn("JDK 17", "\n".join(report["macos_java_home"]["summary"]))
+        self.assertEqual(report["sdk"]["candidates"][0]["api"], "15")
+        self.assertEqual(report["sdk"]["candidates"][0]["components"], ["ets", "toolchains"])
+        self.assertEqual(run_mock.call_count, 5)
+
+    def test_doctor_command_returns_zero_even_when_environment_is_not_ready(self) -> None:
+        report = {
+            "detection": {
+                "ready": False,
+                "blockers": ["sdk_missing"],
+            },
+            "doctor": {
+                "tools": {},
+                "macos_java_home": {"available": False, "summary": []},
+                "sdk": {"selected": None, "candidates": []},
+                "deveco": {"selected": None, "candidates": []},
+            },
+        }
+
+        with (
+            mock.patch.object(sys, "argv", ["harmony_build.py", "doctor", "--repo", "/repo", "--json"]),
+            mock.patch.object(HARMONY_BUILD, "build_doctor_report", return_value=report),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            exit_code = HARMONY_BUILD.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"ready": false', output.getvalue())
+
+    def test_macos_usr_bin_java_without_libexec_does_not_return_usr(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(HARMONY_BUILD, "RUNTIME", "macos"),
+            mock.patch.object(HARMONY_BUILD, "resolve_macos_java_home", return_value=None),
+        ):
+            java_home = HARMONY_BUILD.java_home_from_path("/usr/bin/java")
+
+        self.assertIsNone(java_home)
+
     def test_detect_environment_skip_preflight_uses_static_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)
@@ -194,6 +304,39 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertIn("harmony_project_markers_missing", result["blockers"])
 
+    def test_repo_hvigorw_not_executable_blocks_path_fallback_and_prints_chmod_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "build-profile.json5").write_text("{}", encoding="utf-8")
+            wrapper = repo / "hvigorw"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            repo_info = {"input": str(repo), "local_path": str(repo), "local_exists": True}
+
+            def fake_is_executable(path: Path) -> bool:
+                return Path(path) != wrapper
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_node", return_value=("/opt/homebrew", "/opt/homebrew/bin/node", [])),
+                mock.patch.object(HARMONY_BUILD, "resolve_java", return_value=("/Library/Java/JDK/Contents/Home", "/usr/bin/java", [])),
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk/15", ["/sdk/15"])),
+                mock.patch.object(HARMONY_BUILD, "candidate_hvigor_paths", return_value=[str(wrapper), "/usr/local/bin/hvigor"]),
+                mock.patch.object(HARMONY_BUILD, "is_executable_file", side_effect=fake_is_executable),
+                mock.patch.object(HARMONY_BUILD, "resolve_optional_tool", return_value=(None, [])),
+                mock.patch.object(HARMONY_BUILD, "candidate_deveco_apps", return_value=[]),
+            ):
+                result = HARMONY_BUILD.detect_environment_for_repo(repo_info, preflight=False)
+
+        self.assertFalse(result["ready"])
+        self.assertIsNone(result["resolved"]["hvigor_path"])
+        self.assertEqual(result["resolved"]["hvigor_kind"], "repo-wrapper-not-executable")
+        self.assertIn("hvigor_missing_or_not_executable", result["blockers"])
+        self.assertIn("chmod +x hvigorw", result["blocker_details"]["hvigor_missing_or_not_executable"])
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            HARMONY_BUILD.print_detection(result)
+        self.assertIn("chmod +x hvigorw", buffer.getvalue())
+
     def test_print_env_snippet_escapes_shell_literals(self) -> None:
         result = {
             "repo": {"local_path": "/Users/o'connor/work/demo"},
@@ -226,6 +369,33 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                 candidates = HARMONY_BUILD.candidate_sdk_roots()
 
         self.assertIn(str(sdk_version.resolve()), candidates)
+
+    def test_recommend_tasks_maps_pages_resources_and_module_config_to_module_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = HARMONY_BUILD.recommend_tasks_for_paths(
+                temp_dir,
+                [
+                    "entry/src/main/ets/pages/Index.ets",
+                    "entry/src/main/resources/base/element/string.json",
+                    "entry/build-profile.json5",
+                    "feature/oh-package.json5",
+                ],
+            )
+
+        templates = [item["task_template"] for item in result["recommendations"]]
+        self.assertEqual(templates, [":entry:assembleHap", ":entry:assembleHap", ":entry:assembleHap", ":feature:assembleHap"])
+        self.assertFalse(result["needs_list_tasks"])
+        self.assertEqual(result["recommendations"][0]["kind"], "ets")
+        self.assertEqual(result["recommendations"][1]["kind"], "resources")
+        self.assertEqual(result["recommendations"][2]["kind"], "module_config")
+
+    def test_recommend_tasks_marks_unknown_paths_for_task_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = HARMONY_BUILD.recommend_tasks_for_paths(temp_dir, ["docs/usage.md"])
+
+        self.assertTrue(result["needs_list_tasks"])
+        self.assertIsNone(result["recommendations"][0]["task_template"])
+        self.assertIn("需先列出公开 hvigor tasks", result["recommendations"][0]["reason"])
 
     def test_run_hvigor_task_redirects_output_to_file_not_pipe(self) -> None:
         repo_path = Path("/repo")
@@ -297,6 +467,19 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertFalse(outcome["success"])
         self.assertEqual(outcome["exit_code"], 2)
         self.assertIn("not an internal .hvigor task key", outcome["output"])
+
+    def test_run_hvigor_task_non_executable_repo_wrapper_mentions_chmod(self) -> None:
+        with mock.patch.object(HARMONY_BUILD, "is_executable_file", return_value=False):
+            outcome = HARMONY_BUILD.run_hvigor_task(
+                "/repo",
+                "/sdk/15",
+                "/repo/hvigorw",
+                "tasks",
+            )
+
+        self.assertFalse(outcome["success"])
+        self.assertEqual(outcome["exit_code"], 126)
+        self.assertIn("chmod +x hvigorw", outcome["output"])
 
 
 if __name__ == "__main__":

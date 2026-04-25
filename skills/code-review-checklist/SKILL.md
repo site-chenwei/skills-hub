@@ -12,6 +12,9 @@ description: Use this skill when the user asks for a review, patch review, PR re
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
 - 所有辅助脚本统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径。
 - 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
+- `<skill_root>` 只能由本次实际打开的 `SKILL.md` 路径推导；不要根据 Skill 名称、同名目录、`.system`、`builtin`、`installed` 等目录习惯切换到其他路径。
+- 调用 `run.py`、`scripts/`、`references/`、模板或其他附件前，先在 `<skill_root>` 下显式确认目标存在；不存在时报告附件缺失并回退手工流程。
+- 对用户说明使用本 Skill 时，区分已确认入口文件、推导出的根目录和已检查存在的附件。
 
 ## 何时使用
 
@@ -29,6 +32,7 @@ description: Use this skill when the user asks for a review, patch review, PR re
    - 逻辑错误、行为回归、边界条件、接口契约不一致、异常处理缺失、测试遗漏。
 3. 按需补看非功能风险。
    - 性能、安全、稳定性、并发、资源释放、迁移兼容、发布链路。
+   - 凭据泄露、外部输入未校验、静默降级、伪成功、假数据、破坏性 Git 或文件操作。
 4. 判断验证是否充分。
    - 检查现有测试、手工验证、构建命令是否真正覆盖受影响范围。
 5. 写 finding 时保留证据。
@@ -50,6 +54,7 @@ description: Use this skill when the user asks for a review, patch review, PR re
 - 用风格偏好淹没真正的行为风险。
 - 在没有运行验证命令的前提下写“测试通过”。
 - 因为实现看起来整洁就忽略契约和回归风险。
+- 因为 diff 小就忽略凭据、输入边界、吞错、假成功或破坏性操作。
 
 ## 深入参考
 

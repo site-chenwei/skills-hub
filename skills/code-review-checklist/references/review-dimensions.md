@@ -27,3 +27,24 @@
 - 安全：是否暴露凭据、未校验外部输入、扩大权限？
 - 稳定性：是否吞错、静默降级、留下不可观测失败？
 - 发布链路：CI/CD、构建脚本、锁文件或镜像是否可能引入隐性回归？
+
+## Harmony / OpenHarmony
+
+- 页面结构：`.ets` 页面根节点、`@Builder` / `@BuilderParam`、导航栈、Tabs、生命周期状态是否仍匹配框架约束？
+- 资源接线：`resources/`、`module.json5`、Ability、设备类型、权限和资源引用名称是否同步？
+- 构建链路：`build-profile.json5`、`hvigorfile.*`、`oh-package.json5` 是否改变 SDK、模块、依赖或打包行为？
+- 验证选择：页面结构、导航层级或资源接线变更是否需要模块级编译；小范围文案/样式变更是否已有更低成本验证覆盖？
+
+## Java / Spring
+
+- 公共契约：controller、API、DTO、schema、错误码和序列化字段是否保持兼容？
+- 数据迁移：SQL、Flyway/Liquibase、schema 变更是否具备顺序、幂等、回滚和历史数据边界说明？
+- 配置行为：`application-*.yml`、profile、环境变量、默认值和条件 Bean 是否会改变线上行为？
+- 构建链路：Maven/Gradle、JDK 版本、插件和锁定依赖是否与 CI、运行镜像和开发环境一致？
+
+## React Web
+
+- 路由与渲染边界：`routes/`、`app/`、`pages/` 改动是否影响嵌套路由、鉴权跳转、SSR/CSR 边界和刷新直达？
+- 客户端契约：`services/`、`api/`、schema、auth 代码是否正确处理请求/响应、错误态、令牌和权限边界？
+- UI 回归：components、hooks、design-system、样式文件是否覆盖响应式布局、交互状态、可访问性和视觉快照风险？
+- 构建链路：package/lockfile、Vite/Next 配置、环境变量前缀和 tree-shaking 行为是否改变产物或运行时行为？

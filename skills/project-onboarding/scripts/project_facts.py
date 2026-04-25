@@ -16,9 +16,12 @@ IGNORED_DIRS = {
     ".svn",
     ".idea",
     ".vscode",
+    ".gradle",
+    ".hvigor",
     ".venv",
     "venv",
     "node_modules",
+    "oh_modules",
     "dist",
     "build",
     "coverage",
@@ -36,6 +39,7 @@ LANGUAGE_NAMES = {
     ".tsx": "TSX",
     ".js": "JavaScript",
     ".jsx": "JSX",
+    ".ets": "ArkTS",
     ".go": "Go",
     ".rs": "Rust",
     ".java": "Java",
@@ -69,9 +73,91 @@ ENTRY_PATTERNS = (
     "src/index.js",
     "src/main.py",
     "cmd/main.go",
+    "entry/src/main/ets/entryability/EntryAbility.ets",
+    "entry/src/main/ets/pages/Index.ets",
+    "src/App.tsx",
+    "src/App.jsx",
+    "app/page.tsx",
+    "pages/index.tsx",
+    "src/main/java",
 )
 
 PYTHON_CMD_PLACEHOLDER = "<python_cmd>"
+
+PACKAGE_SCRIPT_ORDER = (
+    ("test", "package.json scripts.test"),
+    ("lint", "package.json scripts.lint"),
+    ("typecheck", "package.json scripts.typecheck"),
+    ("build", "package.json scripts.build"),
+)
+
+HARMONY_ROOT_CONFIGS = {
+    "build-profile.json5",
+    "oh-package.json5",
+}
+
+HARMONY_VALIDATION_TEMPLATE = "$harmony-build verify --task <public module task>"
+
+JAVA_CONFIG_NAMES = {
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "gradlew",
+    "gradlew.bat",
+}
+
+SPRING_CONFIG_NAMES = {
+    "application.properties",
+    "application.yml",
+    "application.yaml",
+    "bootstrap.properties",
+    "bootstrap.yml",
+    "bootstrap.yaml",
+}
+
+REACT_DEPENDENCY_NAMES = {
+    "react",
+    "react-dom",
+    "next",
+    "@remix-run/react",
+    "@vitejs/plugin-react",
+    "@vitejs/plugin-react-swc",
+    "react-scripts",
+}
+
+REACT_CONFIG_NAMES = {
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "next.config.js",
+    "next.config.mjs",
+    "next.config.ts",
+    "remix.config.js",
+    "remix.config.mjs",
+    "remix.config.ts",
+}
+
+REACT_TEST_OR_STORYBOOK_DEPS = {
+    "vitest",
+    "jest",
+    "@testing-library/react",
+    "@playwright/test",
+    "cypress",
+    "storybook",
+    "@storybook/react",
+    "@storybook/react-vite",
+    "@storybook/nextjs",
+}
+
+MODULE_MARKER_NAMES = {
+    "package.json",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+}
 
 
 def is_test_path(path_text: str) -> bool:
@@ -85,6 +171,28 @@ def is_test_path(path_text: str) -> bool:
         or ".spec." in lowered
         or ".test." in lowered
     )
+
+
+def relative_path(repo: Path, path: Path) -> str:
+    return str(path.relative_to(repo)).replace("\\", "/")
+
+
+def module_path(repo: Path, path: Path) -> str:
+    relative = str(path.relative_to(repo)).replace("\\", "/")
+    return relative if relative else "."
+
+
+def quote_command_path(path_text: str) -> str:
+    if all(char.isalnum() or char in "/._-" for char in path_text):
+        return path_text
+    escaped = path_text.replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def scope_command(command: str, path_text: str) -> str:
+    if path_text == ".":
+        return command
+    return f"cd {quote_command_path(path_text)} && {command}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -189,17 +297,34 @@ def detect_configs(repo: Path) -> list[str]:
         "poetry.lock",
         "Cargo.toml",
         "go.mod",
+        "tsconfig.json",
         "pom.xml",
         "build.gradle",
         "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "gradlew.bat",
+        "build-profile.json5",
+        "oh-package.json5",
+        "AppScope/app.json5",
         "Makefile",
         "docker-compose.yml",
         "docker-compose.yaml",
     ]
+    config_names.extend(sorted(REACT_CONFIG_NAMES))
     present = []
     for name in config_names:
         if (repo / name).exists():
             present.append(name)
+    if (repo / ".storybook").is_dir():
+        present.append(".storybook/")
+    for path in iter_files(repo):
+        relative = relative_path(repo, path)
+        name = path.name.lower()
+        if name == "module.json5" or name.startswith("hvigorfile.") or name in SPRING_CONFIG_NAMES:
+            if relative not in present:
+                present.append(relative)
     return present
 
 
@@ -216,6 +341,117 @@ def detect_languages(repo: Path) -> list[dict]:
 
 def language_names(languages: list[dict]) -> set[str]:
     return {item["name"] for item in languages}
+
+
+def package_dependency_names(package_data: dict | None) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(package_data, dict):
+        return names
+    for section in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]:
+        values = package_data.get(section)
+        if isinstance(values, dict):
+            names.update(str(name).lower() for name in values)
+    return names
+
+
+def package_script_values(package_data: dict | None) -> list[str]:
+    if not isinstance(package_data, dict):
+        return []
+    scripts = package_data.get("scripts", {})
+    if not isinstance(scripts, dict):
+        return []
+    return [str(value).lower() for value in scripts.values()]
+
+
+def has_harmony_signals(repo: Path) -> bool:
+    for name in HARMONY_ROOT_CONFIGS:
+        if (repo / name).exists():
+            return True
+    if (repo / "AppScope" / "app.json5").exists():
+        return True
+    for path in iter_files(repo):
+        name = path.name.lower()
+        if name == "module.json5" or name.startswith("hvigorfile."):
+            return True
+        if path.suffix.lower() == ".ets":
+            return True
+    return False
+
+
+def has_harmony_high_risk_signals(repo: Path) -> bool:
+    for name in HARMONY_ROOT_CONFIGS:
+        if (repo / name).exists():
+            return True
+    if (repo / "AppScope" / "app.json5").exists():
+        return True
+    for path in iter_files(repo):
+        relative = relative_path(repo, path).lower()
+        name = path.name.lower()
+        if name == "module.json5" or name.startswith("hvigorfile."):
+            return True
+        if path.suffix.lower() == ".ets" and any(
+            marker in f"/{relative}" for marker in ["/pages/", "/entry/src/main/ets/", "/feature/"]
+        ):
+            return True
+        if "/resources/" in f"/{relative}/":
+            return True
+    return False
+
+
+def has_java_signals(repo: Path, languages: list[dict]) -> bool:
+    names = language_names(languages)
+    if "Java" in names or "Kotlin" in names:
+        return True
+    if any((repo / name).exists() for name in JAVA_CONFIG_NAMES):
+        return True
+    score = 0
+    for path in iter_files(repo):
+        relative = relative_path(repo, path).lower()
+        name = path.name.lower()
+        if name in SPRING_CONFIG_NAMES:
+            score += 2
+        if "/src/main/java/" in f"/{relative}" or "/src/test/java/" in f"/{relative}":
+            score += 2
+        if any(marker in f"/{relative}" for marker in ["/controller/", "/service/", "/repository/"]):
+            score += 1
+        if "migration" in relative or "/db/migrate/" in relative or "/db/migration/" in relative:
+            score += 1
+        if score >= 2:
+            return True
+    return score >= 2
+
+
+def has_react_web_signals(repo: Path, package_data: dict | None, languages: list[dict]) -> bool:
+    deps = package_dependency_names(package_data)
+    scripts = package_script_values(package_data)
+    names = language_names(languages)
+    has_react_web_dependency = bool(deps & (REACT_DEPENDENCY_NAMES - {"react"}))
+    has_react_tooling = bool(deps & REACT_TEST_OR_STORYBOOK_DEPS)
+    has_react_framework_script = any(
+        marker in script for script in scripts for marker in ["next", "react-scripts", "remix", "storybook"]
+    )
+    has_vite_script = any("vite" in script for script in scripts)
+    has_react_config = any((repo / name).exists() for name in REACT_CONFIG_NAMES) or (repo / ".storybook").is_dir()
+    has_react_entry = any(
+        (repo / candidate).exists()
+        for candidate in [
+            "src/App.tsx",
+            "src/App.jsx",
+            "src/main.tsx",
+            "src/index.tsx",
+            "app/page.tsx",
+            "pages/index.tsx",
+        ]
+    )
+    has_react_dependency = has_react_web_dependency or ("react" in deps and (has_react_entry or has_react_config))
+    return bool(
+        has_react_dependency
+        or (has_react_tooling and any(name in names for name in {"TSX", "JSX"}))
+        or (has_react_framework_script and any(name in names for name in {"TSX", "JSX", "TypeScript", "JavaScript"}))
+        or (has_vite_script and (has_react_dependency or any(name in names for name in {"TSX", "JSX"})))
+        or (has_react_config and (has_react_dependency or any(name in names for name in {"TSX", "JSX"})))
+        or has_react_entry
+    )
 
 
 def detect_top_level_dirs(repo: Path) -> list[str]:
@@ -237,6 +473,10 @@ def detect_primary_stacks(
 ) -> list[str]:
     stacks = []
     names = language_names(languages)
+    if has_harmony_signals(repo):
+        stacks.append("harmony")
+    if has_react_web_signals(repo, package_data, languages):
+        stacks.append("react-web")
     if (
         package_data is not None
         or detect_package_manager(repo, package_data) is not None
@@ -256,13 +496,8 @@ def detect_primary_stacks(
         stacks.append("go")
     if (repo / "Cargo.toml").exists() or "Rust" in names:
         stacks.append("rust")
-    if (
-        (repo / "pom.xml").exists()
-        or (repo / "build.gradle").exists()
-        or (repo / "build.gradle.kts").exists()
-        or any(name in names for name in {"Java", "Kotlin"})
-    ):
-        stacks.append("jvm")
+    if has_java_signals(repo, languages):
+        stacks.append("java")
     return stacks
 
 
@@ -270,6 +505,12 @@ def add_candidate(candidates: list[dict], command: str, reason: str) -> None:
     if any(item["command"] == command for item in candidates):
         return
     candidates.append({"command": command, "reason": reason})
+
+
+def package_script_command(package_manager: str, script_name: str) -> str:
+    if script_name == "test":
+        return f"{package_manager} test"
+    return f"{package_manager} run {script_name}"
 
 
 def has_python_tests(repo: Path) -> bool:
@@ -290,12 +531,9 @@ def detect_validation_commands(
     package_manager = detect_package_manager(repo, package_data)
     scripts = package_data.get("scripts", {}) if isinstance(package_data, dict) else {}
     if package_manager and isinstance(scripts, dict):
-        if "test" in scripts:
-            add_candidate(candidates, f"{package_manager} test", "package.json scripts.test")
-        if "lint" in scripts:
-            add_candidate(candidates, f"{package_manager} run lint", "package.json scripts.lint")
-        if "build" in scripts:
-            add_candidate(candidates, f"{package_manager} run build", "package.json scripts.build")
+        for script_name, reason in PACKAGE_SCRIPT_ORDER:
+            if script_name in scripts:
+                add_candidate(candidates, package_script_command(package_manager, script_name), reason)
 
     if "python" in primary_stacks:
         if has_python_tests(repo):
@@ -320,6 +558,12 @@ def detect_validation_commands(
         add_candidate(candidates, "mvn test", "Maven project detected")
     if (repo / "build.gradle").exists() or (repo / "build.gradle.kts").exists():
         add_candidate(candidates, "./gradlew test", "Gradle project detected")
+    if "harmony" in primary_stacks and has_harmony_high_risk_signals(repo):
+        add_candidate(
+            candidates,
+            HARMONY_VALIDATION_TEMPLATE,
+            "Harmony high-risk candidate; confirm the public module task before running verification",
+        )
     if (repo / "Makefile").exists():
         add_candidate(candidates, "make test", "Makefile detected")
 
@@ -333,6 +577,65 @@ def detect_entry_points(repo: Path) -> list[str]:
         if path.exists():
             entries.append(candidate)
     return entries[:6]
+
+
+def detect_module_roots(repo: Path) -> list[Path]:
+    roots: set[Path] = set()
+    for path in iter_files(repo):
+        if path.name in MODULE_MARKER_NAMES:
+            roots.add(path.parent)
+    return sorted(roots, key=lambda path: module_path(repo, path))
+
+
+def localize_module_validation_commands(
+    module_root: Path,
+    path_text: str,
+    validation_commands: list[dict],
+) -> list[dict]:
+    localized = []
+    for item in validation_commands:
+        command = item["command"]
+        if (
+            command == "./gradlew test"
+            and path_text != "."
+            and not (module_root / "gradlew").exists()
+            and not (module_root / "gradlew.bat").exists()
+        ):
+            command = "gradle test"
+        localized.append(
+            {
+                "command": scope_command(command, path_text),
+                "reason": item["reason"],
+            }
+        )
+    return localized
+
+
+def collect_modules(repo: Path) -> list[dict]:
+    modules = []
+    for root in detect_module_roots(repo):
+        package_data, package_error = load_package_json(root)
+        pyproject_data, pyproject_error = load_pyproject(root)
+        languages = detect_languages(root)
+        stacks = detect_primary_stacks(root, package_data, pyproject_data, languages)
+        configs = detect_configs(root)
+        if not stacks and not configs:
+            continue
+
+        path_text = module_path(repo, root)
+        validation_commands = detect_validation_commands(root, package_data, pyproject_data, stacks)
+        module = {
+            "path": path_text,
+            "stacks": stacks,
+            "configs": configs,
+            "package_manager": detect_package_manager(root, package_data),
+            "validation_commands": localize_module_validation_commands(root, path_text, validation_commands),
+        }
+        parse_errors = [error for error in [package_error, pyproject_error] if error]
+        if parse_errors:
+            module["parse_errors"] = parse_errors
+        modules.append(module)
+    return modules
 
 
 def collect_facts(repo: Path) -> dict:
@@ -352,6 +655,7 @@ def collect_facts(repo: Path) -> dict:
     validation_commands = detect_validation_commands(repo, package_data, pyproject_data, primary_stacks)
     entry_points = detect_entry_points(repo)
     top_level_dirs = detect_top_level_dirs(repo)
+    modules = collect_modules(repo)
 
     needs_confirmation = []
     if parse_errors:
@@ -380,6 +684,7 @@ def collect_facts(repo: Path) -> dict:
             "languages": languages,
             "validation_commands": validation_commands,
             "entry_points": entry_points,
+            "modules": modules,
         },
         "needs_confirmation": needs_confirmation,
     }
@@ -406,6 +711,20 @@ def render_markdown(facts: dict) -> str:
     if inferred["validation_commands"]:
         for item in inferred["validation_commands"]:
             lines.append(f"  - {item['command']}  # {item['reason']}")
+    else:
+        lines.append("  - 未识别")
+    lines.append("- 模块候选：")
+    modules = inferred.get("modules", [])
+    if modules:
+        for module in modules:
+            stacks = ", ".join(module["stacks"]) or "未识别"
+            configs = ", ".join(module["configs"]) or "未发现"
+            package_manager = module["package_manager"] or "未识别"
+            lines.append(
+                f"  - {module['path']}  # stacks={stacks}; package_manager={package_manager}; configs={configs}"
+            )
+            for item in module["validation_commands"]:
+                lines.append(f"    - {item['command']}  # {item['reason']}")
     else:
         lines.append("  - 未识别")
     if facts["parse_errors"]:

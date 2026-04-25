@@ -12,6 +12,9 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - Set `<skill_root>` to the directory containing the `SKILL.md` file you opened for this skill.
 - Invoke bundled helpers through `<python_cmd> <skill_root>/run.py ...`; do not hand-write `scripts/*.py` install paths or guess whether the skill lives under `.system/`.
 - `<python_cmd>` means the available Python launcher in the current environment. On Windows/PowerShell prefer `py -3`, then `python`, then `python3`; on Unix prefer `python3`, then `python`.
+- Derive `<skill_root>` only from the actually opened `SKILL.md`; do not switch to another path based on the skill name, similarly named directories, `.system`, `builtin`, `installed`, or directory conventions.
+- Before using `run.py`, `scripts/`, `references/`, templates, or other bundled files, resolve them under `<skill_root>` and explicitly confirm they exist; if missing, report the missing attachment and fall back to a manual workflow.
+- When path details matter in the user-visible answer, distinguish the confirmed entry file, derived root directory, and attachments actually checked.
 
 ## Priority Rule
 
@@ -97,6 +100,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 
 - Prefer local evidence over memory, and do not skip the local DocsHub lookup when it could plausibly answer the question.
 - Return the resolved file path and `source_url` when available.
+- If the local index, dependency cache, or document source is unavailable, report the failure explicitly; do not silently degrade to memory, empty results, or fabricated sources.
 - If the local snapshot has no answer, or the user explicitly asks for the latest online state, say the local hub may be stale and then consult the official source or another appropriate lookup method.
 
 ## References

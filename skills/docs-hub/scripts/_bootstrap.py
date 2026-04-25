@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from importlib import metadata as importlib_metadata
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,6 +21,7 @@ REQUIREMENTS_FILE = "requirements-build.txt"
 HUB_MARKERS = ("docsets.json", "doc-search/docsets.json", "DocsHub/docsets.json")
 RUNTIME_ROOT_ENV = "SKILLS_HUB_RUNTIME_DIR"
 RUNTIME_DIR_NAME = "docs-hub"
+_REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 
 
 class HubRootError(ValueError):
@@ -72,6 +75,91 @@ def requirements_hash(root: Path | None = None) -> str:
     if not req.exists():
         raise FileNotFoundError(req)
     return hashlib.sha256(req.read_bytes()).hexdigest()
+
+
+def current_python_version() -> str:
+    return ".".join(str(part) for part in sys.version_info[:3])
+
+
+def _normalize_python_path(path_text: str) -> str:
+    if not path_text:
+        return ""
+    path = Path(path_text).expanduser()
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def current_python_executable() -> str:
+    return _normalize_python_path(sys.executable)
+
+
+def normalize_distribution_name(name: str) -> str:
+    return name.strip().replace("_", "-").casefold()
+
+
+def required_distribution_names(req_path: Path) -> set[str]:
+    required: set[str] = set()
+    for raw_line in req_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        match = _REQ_NAME_RE.match(line)
+        if not match:
+            continue
+        required.add(normalize_distribution_name(match.group(1)))
+    return required
+
+
+def installed_distribution_names(site_packages: Path) -> set[str]:
+    names: set[str] = set()
+    for dist in importlib_metadata.distributions(path=[str(site_packages)]):
+        raw_name = str(dist.metadata.get("Name") or "").strip()
+        if raw_name:
+            names.add(normalize_distribution_name(raw_name))
+    return names
+
+
+def dependency_cache_problem(state: dict[str, Any], root: Path | None = None) -> str | None:
+    root = root or skill_root()
+    req_path = requirements_path(root)
+    try:
+        expected_hash = requirements_hash(root)
+    except FileNotFoundError as exc:
+        return f"缺少依赖清单: {exc}"
+
+    if str(state.get("requirements_hash") or "") != expected_hash:
+        return "依赖清单已变更"
+
+    expected_python = current_python_version()
+    state_python = str(state.get("python_version") or "")
+    if state_python != expected_python:
+        return f"Python 版本不匹配：初始化使用 {state_python or 'unknown'}，当前为 {expected_python}"
+
+    installer_python = str(state.get("installer_python") or "")
+    if installer_python and _normalize_python_path(installer_python) != current_python_executable():
+        return (
+            "Python 解释器不匹配："
+            f"初始化使用 {_normalize_python_path(installer_python)}，当前为 {current_python_executable()}"
+        )
+
+    raw_site_packages = str(state.get("site_packages") or "")
+    if not raw_site_packages:
+        return "初始化状态缺少 site-packages"
+    site_packages = Path(raw_site_packages)
+    if not site_packages.exists():
+        return f"缺少 site-packages: {site_packages}"
+
+    try:
+        required = required_distribution_names(req_path)
+        installed = installed_distribution_names(site_packages)
+    except Exception as exc:  # noqa: BLE001
+        return f"依赖缓存不可读取: {exc}"
+    missing = sorted(required - installed)
+    if missing:
+        return f"依赖缓存缺少分发包: {', '.join(missing)}"
+    return None
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -164,24 +252,10 @@ def ensure_initialized(command_label: str, root: Path | None = None) -> dict[str
             f"  若需手动排查，再运行: {init_cmd}"
         )
 
-    site_packages = Path(str(state.get("site_packages") or ""))
-    if not site_packages.exists():
+    problem = dependency_cache_problem(state, root)
+    if problem:
         raise SystemExit(
-            f"[error] $docs-hub 初始化状态已失效，缺少 site-packages: {site_packages}\n"
-            f"  请先在 Codex 中执行: $docs-hub init\n"
-            f"  若需手动排查，再运行: {init_cmd}"
-        )
-
-    try:
-        expected_hash = requirements_hash(root)
-    except FileNotFoundError as exc:
-        raise SystemExit(
-            f"[error] $docs-hub 缺少依赖清单: {exc}\n"
-            f"  请确认 skill 安装完整后重新运行: {init_cmd}"
-        ) from exc
-    if state.get("requirements_hash") != expected_hash:
-        raise SystemExit(
-            f"[error] $docs-hub 依赖清单已变更，当前初始化状态过期。\n"
+            f"[error] $docs-hub 初始化状态已失效：{problem}\n"
             f"  请先在 Codex 中执行: $docs-hub init\n"
             f"  若需手动排查，再运行: {init_cmd}"
         )

@@ -12,6 +12,9 @@ description: Use this skill when entering an unfamiliar repository, before cross
 - 先把 `<skill_root>` 设为当前已打开 `SKILL.md` 的所在目录。
 - 所有辅助脚本统一通过 `<python_cmd> <skill_root>/run.py ...` 调用，不要手拼 `scripts/*.py` 的绝对路径，也不要假设 Skill 一定位于 `~/.codex/skills/.system/` 下。
 - 其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
+- `<skill_root>` 只能由本次实际打开的 `SKILL.md` 路径推导；不要根据 Skill 名称、同名目录、`.system`、`builtin`、`installed` 等目录习惯切换到其他路径。
+- 调用 `run.py`、`scripts/`、`references/`、模板或其他附件前，先在 `<skill_root>` 下显式确认目标存在；不存在时报告附件缺失并回退手工流程。
+- 对用户说明使用本 Skill 时，区分已确认入口文件、推导出的根目录和已检查存在的附件。
 
 ## 何时使用
 
@@ -32,6 +35,7 @@ description: Use this skill when entering an unfamiliar repository, before cross
    - 只补读和当前任务直接相关的文件，不做无边界漫游。
 3. 提取五类事实。
    - 目标、预期结果、边界范围、约束条件、验证路径。
+   - 同时识别凭据、`.env`、外部输入、破坏性文件操作和构建链路等风险信号；只记录风险，不读取或展示敏感值。
 4. 落到本次任务。
    - 明确涉及文件、核心模块、调用链、数据结构、配置项和潜在回归面。
 5. 区分事实层级。

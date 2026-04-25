@@ -24,6 +24,8 @@
 
 所有 Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 Skill 根目录暴露统一的 `run.py` 入口。调用时先取当前已打开 `SKILL.md` 的所在目录作为 `<skill_root>`，再执行 `<python_cmd> <skill_root>/run.py ...`，不要手拼 `scripts/*.py` 的安装绝对路径。其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 
+每个 Skill 的 `SKILL.md` 必须独立写清运行约定：仓库源码布局不代表运行时安装路径，`<skill_root>` 只能由本次实际打开的入口文件推导；查找 `run.py`、`scripts/`、`references/`、模板或其他附件前，必须先基于该根目录显式确认目标存在；路径不一致或附件缺失时，报告问题并回退手工流程，不根据同名目录、`.system`、`builtin`、`installed` 等目录习惯猜测替代路径。
+
 ## 运行态目录约定
 
 带本地缓存、初始化状态或运行时依赖的 Skill，统一使用用户级外置目录：

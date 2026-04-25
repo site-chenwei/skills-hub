@@ -22,6 +22,19 @@
 - 安全、性能、稳定性相关改动
 - 用户明确要求先给方案或需要可审计的阶段输出
 
+## 技术栈高风险路径
+
+- HarmonyOS / OpenHarmony：
+  - `.ets` 页面结构、导航层级、根节点、Builder / BuilderParam、Tabs / Navigation 相关变更
+  - `build-profile.json5`、`hvigorfile.*`、`oh-package.json5`、`module.json5`、`resources/`
+  - 验证优先级：小改先源码级 / 手工最小路径；命中上述高风险点时倾向模块级 hvigor 编译，不默认整包构建
+- Java / JVM：
+  - controller、api、dto、schema、migration、config、dependency
+  - 验证优先级：受影响模块的 `./gradlew test` 或 `mvn test`；接口、DTO、迁移和配置变更补契约 / 数据边界验证
+- React Web：
+  - routing、SSR / data loading、API client、auth、schema、design-system、package / lockfile
+  - 验证优先级：相关 package scripts 的 `test`、`lint`、`typecheck`；路由、SSR、schema、design-system、依赖变更按风险补 `build`
+
 ## 阶段门禁
 
 - Research 完成：

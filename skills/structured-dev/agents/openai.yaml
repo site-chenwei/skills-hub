@@ -1,4 +1,4 @@
 interface:
   display_name: "structured-dev"
   short_description: "Generate change briefs, choose workflow depth, and enforce validation gates."
-  default_prompt: "Use $structured-dev to generate a change brief, choose light vs full workflow, and deliver the task with explicit review and verification gates. When invoking bundled helpers, derive <skill_root> from the opened SKILL.md path and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."
+  default_prompt: "Use $structured-dev to generate a change brief, choose light vs full workflow, protect existing user changes, and deliver the task with explicit review and minimal-sufficient verification gates. When invoking bundled helpers, derive <skill_root> only from the opened SKILL.md path, confirm referenced run.py/scripts/references exist under that root, and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."
