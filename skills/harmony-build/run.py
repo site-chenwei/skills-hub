@@ -9,11 +9,23 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent
 SCRIPT_PATH = SKILL_ROOT / "scripts" / "harmony_build.py"
-COMMANDS = {"detect", "doctor", "recommend-task", "list-tasks", "verify", "build", "print-env"}
+COMMANDS = {
+    "detect",
+    "doctor",
+    "recommend-task",
+    "list-tasks",
+    "verify",
+    "build",
+    "capture-logs",
+    "print-env",
+}
 
 
 def print_usage() -> None:
-    print("usage: run.py {detect,doctor,recommend-task,list-tasks,verify,build,print-env} [args...]", file=sys.stderr)
+    print(
+        "usage: run.py {detect,doctor,recommend-task,list-tasks,verify,build,capture-logs,print-env} [args...]",
+        file=sys.stderr,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

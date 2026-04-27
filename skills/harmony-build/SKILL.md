@@ -25,6 +25,7 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 - 用户要求在 Mac 上验证 HarmonyOS / OpenHarmony 项目能否构建、打包、签名或安装。
 - 用户要求排查 `hvigorw`、`hvigor`、Node、Java、Harmony SDK、DevEco Studio、`ohpm` 或 `hdc` 环境问题。
+- 用户要求通过 `hdc` 抓取设备 HiLog 日志，尤其是只抓某个应用、tag、pid 或关键词相关日志。
 - 改动明显影响 `build-profile.json5`、`hvigorfile.*`、模块依赖、签名配置、打包配置、构建脚本、工具链或 SDK/Node/Java 相关配置。
 - 你需要给出“Mac 本机 hvigor 验证通过/失败”的结论。
 
@@ -101,6 +102,19 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - 可用 `--paths <paths...>` 帮助选择更小的构建任务；可用 `--task <public task>` 显式覆盖自动选择。
   - `--timeout-seconds <seconds>` 是整条 build flow 的 hvigor 等待预算，默认 900 秒；自动列任务阶段另有 `--list-timeout-seconds <seconds>`，默认 120 秒。超时后进程清理会有短暂兜底等待。
   - JSON 输出会保留 `verification.phase`、`verification.task`、`verification.timed_out`、`timeout_seconds` 和 `list_timeout_seconds`；成功时清空 hvigor 输出字段，失败时保留错误尾部。
+
+- `<skill_root>/run.py capture-logs`
+  - 通过 `hdc hilog` 抓取设备日志；不要求 hvigor 环境 ready。
+  - 会优先从 DevEco SDK / Harmony SDK 的 `toolchains/hdc` 解析可执行文件，即使 `hdc` 尚未加入 shell `PATH` 也可以工作。
+  - 默认从 `--repo` 指定项目的 `AppScope/app.json5` / `module.json5` 推断 `bundleName` 并作为应用过滤；如果未能推断且没有 `--app`、`--keyword`、`--regex`、`--tag` 或 `--pid`，会拒绝全量抓取。
+  - 默认快照模式执行 `hdc hilog -x -z <buffer-lines>`，读取设备端日志缓存尾部并在 agent 侧二次过滤；如果设备侧命令没有及时自然退出，包装层会按 `--timeout-seconds` 受控停止后再过滤输出；可用 `--duration-seconds <n>` 切到限时实时抓取。
+  - 输出默认最多返回 `--max-lines` 条匹配日志，避免把设备全量日志灌进上下文。
+  - 常用命令：
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --keyword <keyword> --max-lines 120`
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --app <bundle-name> --keyword <keyword> --duration-seconds 20`
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --tag <tag> --level ERROR --json`
+  - 多设备连接时传 `--target <hdc-target-id>`，目标 id 可先用 `hdc list targets` 或 DevEco 的设备列表确认。
+  - 只有用户明确要求全设备日志时才传 `--allow-unfiltered`。
 
 - `<skill_root>/run.py verify`
   - 默认优先复用缓存基线；缺失、失效或显式 `--refresh` 时，只做静态探测，然后直接运行目标任务。

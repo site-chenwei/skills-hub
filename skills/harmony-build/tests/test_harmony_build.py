@@ -1183,6 +1183,165 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertEqual(outcome["exit_code"], 126)
         self.assertIn("chmod +x hvigorw", outcome["output"])
 
+    def test_candidate_hdc_paths_includes_deveco_openharmony_toolchains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            deveco_app = Path(temp_dir) / "DevEco-Studio.app"
+            hdc_path = deveco_app / "Contents" / "sdk" / "default" / "openharmony" / "toolchains" / "hdc"
+            hdc_path.parent.mkdir(parents=True)
+            hdc_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            hdc_path.chmod(0o755)
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "which_all", return_value=[]),
+                mock.patch.object(HARMONY_BUILD, "candidate_sdk_roots", return_value=[]),
+                mock.patch.object(HARMONY_BUILD, "candidate_deveco_apps", return_value=[str(deveco_app)]),
+            ):
+                candidates = HARMONY_BUILD.candidate_hdc_paths()
+
+        self.assertIn(str(hdc_path.resolve()), candidates)
+
+    def test_read_project_bundle_name_ignores_json5_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            app_scope = repo / "AppScope"
+            app_scope.mkdir()
+            (app_scope / "app.json5").write_text(
+                """
+{
+  // bundleName: "commented.bundle"
+  app: {
+    bundleName: "site.chenwei.dns"
+  }
+}
+""",
+                encoding="utf-8",
+            )
+
+            bundle_name = HARMONY_BUILD.read_project_bundle_name(repo)
+
+        self.assertEqual(bundle_name, "site.chenwei.dns")
+
+    def test_capture_hilog_infers_app_applies_keyword_and_line_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            app_scope = repo / "AppScope"
+            app_scope.mkdir()
+            (app_scope / "app.json5").write_text('{ app: { bundleName: "site.chenwei.dns" } }\n', encoding="utf-8")
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(args[0], "/tools/hdc")
+                self.assertIn("hilog", args)
+                self.assertIn("-x", args)
+                self.assertIn("-z", args)
+                self.assertIn("50", args)
+                self.assertIn("-e", args)
+                output = "\n".join(
+                    [
+                        "04-27 I A00000/site.chenwei.dns/DNSHelper: keep first",
+                        "04-27 I A00000/other.app/DNSHelper: keep other",
+                        "04-27 I A00000/site.chenwei.dns/DNSHelper: keep second",
+                    ]
+                )
+                return HARMONY_BUILD.subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run),
+            ):
+                result = HARMONY_BUILD.capture_hilog(
+                    str(repo),
+                    keywords=["keep"],
+                    buffer_lines=50,
+                    max_lines=1,
+                )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["filters"]["app"], "site.chenwei.dns")
+        self.assertEqual(result["capture"]["matched_lines"], 2)
+        self.assertEqual(result["capture"]["returned_lines"], 1)
+        self.assertTrue(result["capture"]["truncated"])
+        self.assertIn("keep second", result["capture"]["output"])
+        self.assertNotIn("keep first", result["capture"]["output"])
+        self.assertNotIn("keep other", result["capture"]["output"])
+
+    def test_capture_hilog_rejects_unfiltered_capture_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=(None, [])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+            ):
+                result = HARMONY_BUILD.capture_hilog(str(temp_dir), infer_app=False)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 2)
+        self.assertIn("Refusing unfiltered", result["capture"]["output"])
+
+    def test_capture_hilog_live_duration_timeout_is_successful_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            app_scope = repo / "AppScope"
+            app_scope.mkdir()
+            (app_scope / "app.json5").write_text('{ app: { bundleName: "site.chenwei.dns" } }\n', encoding="utf-8")
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(kwargs.get("timeout"), 2)
+                raise HARMONY_BUILD.subprocess.TimeoutExpired(
+                    cmd=args,
+                    timeout=2,
+                    output="04-27 I A00000/site.chenwei.dns/DNSHelper: live hit\n",
+                    stderr="",
+                )
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run),
+            ):
+                result = HARMONY_BUILD.capture_hilog(str(repo), duration_seconds=2, max_lines=10)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["mode"], "live")
+        self.assertTrue(result["capture"]["duration_limited"])
+        self.assertIn("live hit", result["capture"]["output"])
+
+    def test_capture_hilog_snapshot_timeout_still_filters_returned_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(kwargs.get("timeout"), 1)
+                raise HARMONY_BUILD.subprocess.TimeoutExpired(
+                    cmd=args,
+                    timeout=1,
+                    output="\n".join(
+                        [
+                            "04-27 I A00000/other.app/DNSHelper: keep but wrong app",
+                            "04-27 I A00000/site.chenwei.dns/DNSHelper: keep right app",
+                        ]
+                    ),
+                    stderr="",
+                )
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run),
+            ):
+                result = HARMONY_BUILD.capture_hilog(
+                    str(repo),
+                    app="site.chenwei.dns",
+                    keywords=["keep"],
+                    timeout_seconds=1,
+                    max_lines=10,
+                )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["capture"]["stopped_by_limit"])
+        self.assertEqual(result["capture"]["matched_lines"], 1)
+        self.assertIn("right app", result["capture"]["output"])
+        self.assertNotIn("wrong app", result["capture"]["output"])
+
 
 if __name__ == "__main__":
     unittest.main()

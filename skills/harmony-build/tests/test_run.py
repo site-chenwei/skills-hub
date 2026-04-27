@@ -22,7 +22,7 @@ class HarmonyBuildRunnerTests(unittest.TestCase):
         self.assertIn("--timeout-seconds", proc.stdout)
 
     def test_runner_forwards_auxiliary_harmony_commands(self) -> None:
-        for command in ["doctor", "recommend-task", "list-tasks", "build"]:
+        for command in ["doctor", "recommend-task", "list-tasks", "build", "capture-logs"]:
             with self.subTest(command=command):
                 proc = subprocess.run(
                     [sys.executable, str(RUNNER_PATH), command, "--help"],

@@ -29,6 +29,9 @@ HVIGOR_TASK_LIST_TIMEOUT_SECONDS = 120
 HVIGOR_PREFLIGHT_TIMEOUT_SECONDS = HVIGOR_TASK_LIST_TIMEOUT_SECONDS
 HVIGOR_OUTPUT_TAIL_LINES = 80
 HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
+HILOG_DEFAULT_BUFFER_LINES = 500
+HILOG_DEFAULT_MAX_LINES = 200
+HILOG_DEFAULT_TIMEOUT_SECONDS = 5
 PROJECT_MARKERS = (
     "build-profile.json5",
     "hvigorfile.ts",
@@ -57,6 +60,8 @@ MODULE_CONFIG_FILES = {"build-profile.json5", "oh-package.json5", "hvigorfile.ts
 RUNTIME_OS_RE = re.compile(r"""["']?runtimeOS["']?\s*:\s*["']([^"']+)["']""")
 PROJECT_CONFIG_IGNORED_DIRS = {".git", ".hvigor", "build", "node_modules", "oh_modules"}
 TASK_LINE_RE = re.compile(r"^\s*([:\w.-]+)\s+-\s+")
+APP_BUNDLE_NAME_RE = re.compile(r"""["']?bundleName["']?\s*:\s*["']([^"']+)["']""")
+HILOG_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL", "D", "I", "W", "E", "F"}
 BUILD_TASK_PREFERENCE = (
     "assembleHap",
     "assembleApp",
@@ -704,6 +709,50 @@ def resolve_optional_tool(command_name: str) -> tuple[str | None, list[str]]:
     return (candidates[0] if candidates else None), candidates
 
 
+def hdc_candidates_from_sdk_root(sdk_root: Path) -> list[Path]:
+    candidates = [
+        sdk_root / "toolchains" / "hdc",
+        sdk_root / "openharmony" / "toolchains" / "hdc",
+        sdk_root / "hms" / "toolchains" / "hdc",
+    ]
+    hms_root, openharmony_root = harmonyos_sdk_component_roots(sdk_root)
+    candidates.extend(
+        [
+            openharmony_root / "toolchains" / "hdc",
+            hms_root / "toolchains" / "hdc",
+        ]
+    )
+    default_root = sdk_root / "default"
+    candidates.extend(
+        [
+            default_root / "openharmony" / "toolchains" / "hdc",
+            default_root / "hms" / "toolchains" / "hdc",
+        ]
+    )
+    return candidates
+
+
+def candidate_hdc_paths(sdk_home: str | None = None) -> list[str]:
+    candidates = [Path(path) for path in which_all("hdc")]
+    if sdk_home:
+        candidates.extend(hdc_candidates_from_sdk_root(Path(sdk_home).expanduser()))
+
+    for sdk_text in candidate_sdk_roots():
+        candidates.extend(hdc_candidates_from_sdk_root(Path(sdk_text)))
+
+    for app_text in candidate_deveco_apps():
+        app = Path(app_text)
+        candidates.extend(hdc_candidates_from_sdk_root(app / "Contents" / "sdk"))
+
+    return unique_values(str(path.resolve()) for path in candidates if path.exists())
+
+
+def resolve_hdc_path(sdk_home: str | None = None) -> tuple[str | None, list[str]]:
+    candidates = candidate_hdc_paths(sdk_home)
+    hdc_path = next((item for item in candidates if is_executable_file(Path(item))), None)
+    return hdc_path, candidates
+
+
 def run_short_command(args: list[str], timeout_seconds: int = 10) -> dict:
     try:
         result = subprocess.run(
@@ -1322,7 +1371,7 @@ def detect_environment_for_repo(
     sdk_home, sdk_candidates = resolve_sdk_root(repo)
     hvigor_path, hvigor_candidates, hvigor_kind = resolve_hvigor_path(repo)
     ohpm_path, ohpm_candidates = resolve_optional_tool("ohpm")
-    hdc_path, hdc_candidates = resolve_optional_tool("hdc")
+    hdc_path, hdc_candidates = resolve_hdc_path(sdk_home)
     deveco_apps = candidate_deveco_apps()
 
     static_ready = bool(
@@ -1813,6 +1862,502 @@ def print_build_result(result: dict) -> None:
         print(summarize_output(output, max_lines=24))
 
 
+def iter_app_identity_files(repo: Path):
+    if not repo.exists() or not repo.is_dir():
+        return
+
+    preferred = [
+        repo / "AppScope" / "app.json5",
+        repo / "src" / "main" / "module.json5",
+    ]
+    seen = set()
+    for path in preferred:
+        if path.is_file():
+            seen.add(path.resolve())
+            yield path
+
+    for root_text, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [dirname for dirname in dirnames if dirname not in PROJECT_CONFIG_IGNORED_DIRS]
+        for filename in ("app.json5", "module.json5"):
+            if filename not in filenames:
+                continue
+            path = Path(root_text) / filename
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            yield path
+
+
+def read_project_bundle_name(repo: Path) -> str | None:
+    for path in iter_app_identity_files(repo) or []:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = APP_BUNDLE_NAME_RE.search(strip_json5_comments(text))
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def split_repeated_csv(values: list[str] | None) -> list[str]:
+    parts = []
+    for value in values or []:
+        for part in value.split(","):
+            normalized = part.strip()
+            if normalized:
+                parts.append(normalized)
+    return unique_values(parts)
+
+
+def validate_hilog_text_value(value: str, label: str) -> str | None:
+    if not value or not value.strip():
+        return f"{label} must not be empty"
+    if any(char in value for char in "\r\n\x00"):
+        return f"{label} must not contain control characters"
+    return None
+
+
+def normalize_hilog_level(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().upper()
+    if normalized not in HILOG_LEVELS:
+        raise ValueError(f"--level must be one of: {', '.join(sorted(HILOG_LEVELS))}")
+    return normalized
+
+
+def validate_hilog_capture_options(
+    *,
+    app: str | None,
+    keywords: list[str],
+    regexes: list[str],
+    tags: list[str],
+    pids: list[str],
+    target: str | None,
+    log_types: list[str],
+    allow_unfiltered: bool,
+) -> str | None:
+    for label, values in (
+        ("--app", [app] if app else []),
+        ("--keyword", keywords),
+        ("--regex", regexes),
+        ("--tag", tags),
+        ("--pid", pids),
+        ("--target", [target] if target else []),
+        ("--type", log_types),
+    ):
+        for value in values:
+            error = validate_hilog_text_value(value, label)
+            if error:
+                return error
+
+    if not allow_unfiltered and not any([app, keywords, regexes, tags, pids]):
+        return (
+            "Refusing unfiltered hilog capture. Pass --app, --keyword, --regex, --tag, or --pid; "
+            "use --allow-unfiltered only for an explicit full-device capture."
+        )
+
+    for pattern in regexes:
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            return f"--regex is invalid: {error}"
+    return None
+
+
+def build_hilog_coarse_regex(app: str | None, keywords: list[str], regexes: list[str], ignore_case: bool) -> str | None:
+    if ignore_case:
+        return None
+    if regexes:
+        return "|".join(f"(?:{pattern})" for pattern in regexes)
+    literals = []
+    if app:
+        literals.append(app)
+    literals.extend(keywords)
+    if not literals:
+        return None
+    return "|".join(re.escape(item) for item in literals)
+
+
+def build_hilog_command(
+    hdc_path: str,
+    *,
+    target: str | None,
+    snapshot: bool,
+    buffer_lines: int,
+    level: str | None,
+    log_types: list[str],
+    tags: list[str],
+    pids: list[str],
+    coarse_regex: str | None,
+) -> list[str]:
+    command = [hdc_path]
+    if target:
+        command.extend(["-t", target])
+    command.append("hilog")
+    if snapshot:
+        command.extend(["-x", "-z", str(buffer_lines)])
+    if log_types:
+        command.extend(["-t", ",".join(log_types)])
+    if level:
+        command.extend(["-L", level])
+    if tags:
+        command.extend(["-T", ",".join(tags)])
+    if pids:
+        command.extend(["-P", ",".join(pids)])
+    if coarse_regex:
+        command.extend(["-e", coarse_regex])
+    return command
+
+
+def hilog_line_matches(
+    line: str,
+    *,
+    app: str | None,
+    keywords: list[str],
+    keyword_match: str,
+    regex_patterns: list[re.Pattern],
+    ignore_case: bool,
+) -> bool:
+    haystack = line.casefold() if ignore_case else line
+    if app:
+        needle = app.casefold() if ignore_case else app
+        if needle not in haystack:
+            return False
+    if keywords:
+        needles = [keyword.casefold() if ignore_case else keyword for keyword in keywords]
+        checks = [needle in haystack for needle in needles]
+        if keyword_match == "all":
+            if not all(checks):
+                return False
+        elif not any(checks):
+            return False
+    if regex_patterns and not any(pattern.search(line) for pattern in regex_patterns):
+        return False
+    return True
+
+
+def filter_hilog_output(
+    raw_output: str,
+    *,
+    app: str | None,
+    keywords: list[str],
+    keyword_match: str,
+    regexes: list[str],
+    ignore_case: bool,
+    max_lines: int,
+) -> dict:
+    flags = re.IGNORECASE if ignore_case else 0
+    regex_patterns = [re.compile(pattern, flags) for pattern in regexes]
+    raw_lines = [line for line in strip_ansi(raw_output).splitlines() if line.strip()]
+    matched = [
+        line
+        for line in raw_lines
+        if hilog_line_matches(
+            line,
+            app=app,
+            keywords=keywords,
+            keyword_match=keyword_match,
+            regex_patterns=regex_patterns,
+            ignore_case=ignore_case,
+        )
+    ]
+    returned = matched[-max_lines:] if max_lines else matched
+    return {
+        "raw_lines": len(raw_lines),
+        "matched_lines": len(matched),
+        "returned_lines": len(returned),
+        "truncated": len(returned) < len(matched),
+        "output": "\n".join(returned),
+    }
+
+
+def run_hilog_command(command: list[str], *, duration_seconds: int | None, timeout_seconds: int) -> dict:
+    started_at = time.monotonic()
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=duration_seconds if duration_seconds else timeout_seconds,
+        )
+        return {
+            "success": result.returncode == 0,
+            "exit_code": result.returncode,
+            "output": combine_process_output(result.stdout, result.stderr),
+            "duration_limited": False,
+            "stopped_by_limit": False,
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+    except subprocess.TimeoutExpired as error:
+        output = combine_process_output(error.stdout, error.stderr)
+        return {
+            "success": True,
+            "exit_code": 0,
+            "output": output,
+            "duration_limited": bool(duration_seconds),
+            "stopped_by_limit": True,
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+    except OSError as error:
+        return {
+            "success": False,
+            "exit_code": getattr(error, "errno", 1) or 1,
+            "output": str(error),
+            "duration_limited": False,
+            "stopped_by_limit": False,
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+
+
+def capture_hilog(
+    repo_arg: str | None,
+    *,
+    app: str | None = None,
+    keywords: list[str] | None = None,
+    regexes: list[str] | None = None,
+    tags: list[str] | None = None,
+    pids: list[str] | None = None,
+    target: str | None = None,
+    level: str | None = None,
+    log_types: list[str] | None = None,
+    buffer_lines: int = HILOG_DEFAULT_BUFFER_LINES,
+    max_lines: int = HILOG_DEFAULT_MAX_LINES,
+    duration_seconds: int | None = None,
+    timeout_seconds: int = HILOG_DEFAULT_TIMEOUT_SECONDS,
+    allow_unfiltered: bool = False,
+    infer_app: bool = True,
+    keyword_match: str = "any",
+    ignore_case: bool = False,
+) -> dict:
+    repo_info = resolve_repo_paths(repo_arg)
+    repo = Path(repo_info["local_path"])
+    sdk_home, sdk_candidates = resolve_sdk_root(repo)
+    hdc_path, hdc_candidates = resolve_hdc_path(sdk_home)
+    inferred_app = read_project_bundle_name(repo) if infer_app and repo_info.get("local_exists") else None
+    effective_app = app or inferred_app
+    keywords = keywords or []
+    regexes = regexes or []
+    tags = tags or []
+    pids = pids or []
+    log_types = log_types or []
+    level = normalize_hilog_level(level)
+
+    validation_error = validate_hilog_capture_options(
+        app=effective_app,
+        keywords=keywords,
+        regexes=regexes,
+        tags=tags,
+        pids=pids,
+        target=target,
+        log_types=log_types,
+        allow_unfiltered=allow_unfiltered,
+    )
+    if validation_error:
+        return {
+            "success": False,
+            "exit_code": 2,
+            "repo": repo_info,
+            "resolved": {
+                "sdk_home": sdk_home,
+                "hdc_path": hdc_path,
+                "inferred_app": inferred_app,
+            },
+            "candidates": {
+                "sdk_home": sdk_candidates,
+                "hdc_path": hdc_candidates,
+            },
+            "filters": {
+                "app": effective_app,
+                "keywords": keywords,
+                "regexes": regexes,
+                "tags": tags,
+                "pids": pids,
+            },
+            "capture": {
+                "success": False,
+                "exit_code": 2,
+                "output": validation_error,
+                "matched_lines": 0,
+                "returned_lines": 0,
+                "truncated": False,
+            },
+        }
+
+    if not hdc_path:
+        return {
+            "success": False,
+            "exit_code": 1,
+            "repo": repo_info,
+            "resolved": {
+                "sdk_home": sdk_home,
+                "hdc_path": None,
+                "inferred_app": inferred_app,
+            },
+            "candidates": {
+                "sdk_home": sdk_candidates,
+                "hdc_path": hdc_candidates,
+            },
+            "filters": {
+                "app": effective_app,
+                "keywords": keywords,
+                "regexes": regexes,
+                "tags": tags,
+                "pids": pids,
+            },
+            "capture": {
+                "success": False,
+                "exit_code": 1,
+                "output": "hdc executable was not found. Install DevEco Studio or add hdc to PATH.",
+                "matched_lines": 0,
+                "returned_lines": 0,
+                "truncated": False,
+            },
+        }
+
+    snapshot = duration_seconds is None
+    coarse_regex = build_hilog_coarse_regex(effective_app, keywords, regexes, ignore_case)
+    command = build_hilog_command(
+        hdc_path,
+        target=target,
+        snapshot=snapshot,
+        buffer_lines=buffer_lines,
+        level=level,
+        log_types=log_types,
+        tags=tags,
+        pids=pids,
+        coarse_regex=coarse_regex,
+    )
+    hdc_outcome = run_hilog_command(command, duration_seconds=duration_seconds, timeout_seconds=timeout_seconds)
+    if hdc_outcome["success"]:
+        capture = filter_hilog_output(
+            hdc_outcome.get("output") or "",
+            app=effective_app,
+            keywords=keywords,
+            keyword_match=keyword_match,
+            regexes=regexes,
+            ignore_case=ignore_case,
+            max_lines=max_lines,
+        )
+        capture.update(
+            {
+                "success": True,
+                "exit_code": 0,
+                "timed_out": False,
+                "duration_limited": hdc_outcome.get("duration_limited", False),
+                "stopped_by_limit": hdc_outcome.get("stopped_by_limit", False),
+                "duration_seconds": hdc_outcome.get("duration_seconds"),
+            }
+        )
+    else:
+        diagnostic = clean_hvigor_output(hdc_outcome.get("output") or "")
+        capture = {
+            "success": False,
+            "exit_code": hdc_outcome.get("exit_code", 1),
+            "timed_out": hdc_outcome.get("timed_out", False),
+            "duration_limited": False,
+            "stopped_by_limit": hdc_outcome.get("stopped_by_limit", False),
+            "duration_seconds": hdc_outcome.get("duration_seconds"),
+            "raw_lines": len([line for line in diagnostic.splitlines() if line.strip()]),
+            "matched_lines": 0,
+            "returned_lines": 0,
+            "truncated": False,
+            "output": summarize_output(diagnostic, max_lines=24),
+        }
+
+    return {
+        "success": bool(capture["success"]),
+        "exit_code": capture["exit_code"],
+        "repo": repo_info,
+        "resolved": {
+            "sdk_home": sdk_home,
+            "hdc_path": hdc_path,
+            "inferred_app": inferred_app,
+        },
+        "candidates": {
+            "sdk_home": sdk_candidates,
+            "hdc_path": hdc_candidates,
+        },
+        "mode": "snapshot" if snapshot else "live",
+        "target": target,
+        "command": command,
+        "filters": {
+            "app": effective_app,
+            "explicit_app": app,
+            "inferred_app": inferred_app,
+            "keywords": keywords,
+            "keyword_match": keyword_match,
+            "regexes": regexes,
+            "tags": tags,
+            "pids": pids,
+            "level": level,
+            "types": log_types,
+            "ignore_case": ignore_case,
+            "coarse_regex": coarse_regex,
+            "allow_unfiltered": allow_unfiltered,
+        },
+        "limits": {
+            "buffer_lines": buffer_lines if snapshot else None,
+            "max_lines": max_lines,
+            "duration_seconds": duration_seconds,
+            "timeout_seconds": timeout_seconds if snapshot else None,
+        },
+        "capture": capture,
+    }
+
+
+def print_hilog_capture(result: dict) -> None:
+    capture = result.get("capture") or {}
+    resolved = result.get("resolved") or {}
+    filters = result.get("filters") or {}
+    limits = result.get("limits") or {}
+    repo = result.get("repo") or {}
+
+    print("HILOG CAPTURE SUCCESS" if capture.get("success") else "HILOG CAPTURE FAILED")
+    print(f"Repo: {repo.get('local_path') or repo.get('input') or 'UNKNOWN'}")
+    print(f"hdc: {resolved.get('hdc_path') or 'NOT FOUND'}")
+    print(f"Mode: {result.get('mode') or 'UNKNOWN'}")
+    if result.get("target"):
+        print(f"Target: {result['target']}")
+    if filters.get("app"):
+        source = "inferred" if filters.get("inferred_app") and not filters.get("explicit_app") else "explicit"
+        print(f"App: {filters['app']} ({source})")
+    if filters.get("keywords"):
+        print(f"Keywords: {', '.join(filters['keywords'])} ({filters.get('keyword_match')})")
+    if filters.get("regexes"):
+        print(f"Regex: {', '.join(filters['regexes'])}")
+    if filters.get("tags"):
+        print(f"Tags: {', '.join(filters['tags'])}")
+    if filters.get("pids"):
+        print(f"PIDs: {', '.join(filters['pids'])}")
+    if filters.get("level"):
+        print(f"Level: {filters['level']}")
+    if limits.get("duration_seconds"):
+        print(f"Duration limit: {limits['duration_seconds']}s")
+    elif limits.get("buffer_lines"):
+        print(f"Device buffer tail: {limits['buffer_lines']} lines")
+    print(f"Matched lines: {capture.get('matched_lines', 0)}")
+    print(f"Returned lines: {capture.get('returned_lines', 0)}")
+    print(f"Truncated: {'yes' if capture.get('truncated') else 'no'}")
+    if capture.get("duration_limited"):
+        print("Stopped by duration: yes")
+    elif capture.get("stopped_by_limit"):
+        print("Stopped by snapshot timeout: yes")
+    if capture.get("timed_out"):
+        print("Timed out: yes")
+    if capture.get("output"):
+        print("Output:")
+        print(capture["output"])
+
+
 def looks_like_environment_failure(output: str) -> bool:
     lowered = output.lower()
     return any(marker.lower() in lowered for marker in ENV_FAILURE_MARKERS)
@@ -1943,6 +2488,71 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore cached ready baselines and rerun detection before building.",
     )
+
+    logs_parser = subparsers.add_parser("capture-logs", help="Capture bounded device HiLog output through hdc.")
+    logs_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    logs_parser.add_argument(
+        "--app",
+        help="Application bundle/process text that must appear in returned log lines. Defaults to inferred bundleName when available.",
+    )
+    logs_parser.add_argument(
+        "--no-infer-app",
+        action="store_true",
+        help="Do not infer bundleName from the project when --app is omitted.",
+    )
+    logs_parser.add_argument(
+        "--keyword",
+        action="append",
+        default=[],
+        help="Keyword that must appear in returned log lines. Repeat to pass multiple keywords.",
+    )
+    logs_parser.add_argument(
+        "--match",
+        choices=("any", "all"),
+        default="any",
+        help="Keyword matching mode when multiple --keyword values are provided. Defaults to any.",
+    )
+    logs_parser.add_argument(
+        "--regex",
+        action="append",
+        default=[],
+        help="Regular expression used for hdc coarse filtering and Python post-filtering. Repeatable.",
+    )
+    logs_parser.add_argument("--tag", action="append", default=[], help="HiLog tag filter. Repeatable or comma-separated.")
+    logs_parser.add_argument("--pid", action="append", default=[], help="HiLog PID filter. Repeatable or comma-separated.")
+    logs_parser.add_argument("--target", help="hdc target id used with `hdc -t <target>` when multiple devices are connected.")
+    logs_parser.add_argument("--level", help="HiLog level filter: DEBUG, INFO, WARN, ERROR, FATAL, D, I, W, E, or F.")
+    logs_parser.add_argument("--type", action="append", default=[], help="HiLog type filter such as app, core, init, or kmsg.")
+    logs_parser.add_argument(
+        "--duration-seconds",
+        type=positive_int,
+        help="Capture live logs for this many seconds. Omit to read a bounded device buffer snapshot.",
+    )
+    logs_parser.add_argument(
+        "--buffer-lines",
+        type=positive_int,
+        default=HILOG_DEFAULT_BUFFER_LINES,
+        help=f"Device buffer tail lines for snapshot mode. Defaults to {HILOG_DEFAULT_BUFFER_LINES}.",
+    )
+    logs_parser.add_argument(
+        "--max-lines",
+        type=positive_int,
+        default=HILOG_DEFAULT_MAX_LINES,
+        help=f"Maximum returned matching lines. Defaults to {HILOG_DEFAULT_MAX_LINES}.",
+    )
+    logs_parser.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HILOG_DEFAULT_TIMEOUT_SECONDS,
+        help=f"Hard timeout for snapshot mode. Defaults to {HILOG_DEFAULT_TIMEOUT_SECONDS}.",
+    )
+    logs_parser.add_argument("--ignore-case", action="store_true", help="Post-filter app, keyword, and regex matches case-insensitively.")
+    logs_parser.add_argument(
+        "--allow-unfiltered",
+        action="store_true",
+        help="Allow full-device capture without app, keyword, regex, tag, or pid filters.",
+    )
+    logs_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
 
     env_parser = subparsers.add_parser("print-env", help="Print a zsh/bash environment bootstrap snippet.")
     env_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
@@ -2117,6 +2727,32 @@ def main() -> int:
             else:
                 print_build_result(result)
             return result["verification"]["exit_code"]
+
+        if args.command == "capture-logs":
+            result = capture_hilog(
+                args.repo,
+                app=args.app,
+                keywords=args.keyword,
+                regexes=args.regex,
+                tags=split_repeated_csv(args.tag),
+                pids=split_repeated_csv(args.pid),
+                target=args.target,
+                level=args.level,
+                log_types=split_repeated_csv(args.type),
+                buffer_lines=args.buffer_lines,
+                max_lines=args.max_lines,
+                duration_seconds=args.duration_seconds,
+                timeout_seconds=args.timeout_seconds,
+                allow_unfiltered=args.allow_unfiltered,
+                infer_app=not args.no_infer_app,
+                keyword_match=args.match,
+                ignore_case=args.ignore_case,
+            )
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print_hilog_capture(result)
+            return result["exit_code"]
 
         if args.command == "print-env":
             result = resolve_detection(
