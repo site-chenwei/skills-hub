@@ -1,4 +1,4 @@
 interface:
   display_name: "code-review-checklist"
   short_description: "Scope diffs, rank findings, and call out regression and test risks."
-  default_prompt: "Use $code-review-checklist to scope the diff first, then report evidence-backed findings, severity, security/stability risks, and test gaps. When invoking bundled helpers, derive <skill_root> only from the opened SKILL.md path, confirm referenced run.py/scripts/references exist under that root, and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."
+  default_prompt: "Use $code-review-checklist to scope the diff first, then report evidence-backed findings, severity, security/stability risks, and test gaps. Use review-context when the user needs a context package only; it must not generate or imply findings before the diff and code are read. When invoking bundled helpers, derive <skill_root> only from the opened SKILL.md path, confirm referenced run.py/scripts/references exist under that root, and call <python_cmd> <skill_root>/run.py ... with the available Python launcher (`py -3`, `python`, or `python3`)."

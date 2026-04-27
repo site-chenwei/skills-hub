@@ -344,9 +344,10 @@ def resolve_query_hub_root(
     if explicit_hub_root:
         hub = Path(explicit_hub_root).expanduser()
         resolved = hub.resolve() if hub.is_absolute() else (cwd / hub).resolve()
-        valid = _try_validate_hub_root(resolved)
-        if valid is not None:
-            return valid
+        try:
+            return validate_hub_root(resolved)
+        except HubRootError as exc:
+            raise SystemExit(f"[error] {exc}") from exc
 
     if saved_hub_root:
         valid = _try_validate_hub_root(Path(saved_hub_root).expanduser())

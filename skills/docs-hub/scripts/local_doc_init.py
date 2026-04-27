@@ -117,10 +117,14 @@ def detect_index_actions(hub_root: Path, build_module) -> tuple[dict[str, Any], 
     actions: list[tuple[str, dict[str, Any], bool]] = []
 
     for docset in cfg.get("docsets", []):
-        docset_id = str(docset.get("id") or "").strip()
+        try:
+            docset_id = build_module.safe_docset_id(docset)
+            build_module.resolve_docset_root(hub_root, docset)
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"[error] docset 配置无效: {exc}") from exc
         if not docset_id:
             continue
-        db_path = hub_root / "index" / f"{docset_id}.sqlite"
+        db_path = build_module.docset_index_path(hub_root, docset)
         if not db_path.exists():
             actions.append(("missing", docset, False))
             continue

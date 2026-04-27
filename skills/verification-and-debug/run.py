@@ -8,13 +8,16 @@ from pathlib import Path
 
 
 SKILL_ROOT = Path(__file__).resolve().parent
+CAPTURE_FAILURE_SCRIPT = SKILL_ROOT / "scripts" / "capture_failure.py"
 COMMANDS = {
-    "capture_failure": SKILL_ROOT / "scripts" / "capture_failure.py",
+    "capture_failure": CAPTURE_FAILURE_SCRIPT,
+    "check": CAPTURE_FAILURE_SCRIPT,
+    "triage": CAPTURE_FAILURE_SCRIPT,
 }
 
 
 def print_usage() -> None:
-    print("usage: run.py {capture_failure} [args...]", file=sys.stderr)
+    print("usage: run.py {capture_failure|check|triage} [args...]", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

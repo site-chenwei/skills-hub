@@ -56,6 +56,15 @@
   - `<python_cmd> -m pytest`
   - `<python_cmd> -m ruff check .`
 
+## Skill 仓库
+
+- 关键文件：`skills/<skill-name>/SKILL.md`、`skills/<skill-name>/run.py`
+- 辅助目录：`skills/<skill-name>/scripts/`、`skills/<skill-name>/tests/`、`skills/<skill-name>/references/`、`skills/<skill-name>/agents/`
+- 模块边界：默认把每个 `skills/<skill-name>` 视为独立 Skill 模块；`pyproject.toml` 也可作为 Python 模块根信号
+- 常见验证：
+  - 优先使用仓库提供的聚合入口，例如 `<python_cmd> -m unittest skills.test_all_skills`
+  - 没有聚合入口时，再按模块或显式发现范围运行 unittest / pytest
+
 ## Go
 
 - 关键文件：`go.mod`、`go.sum`

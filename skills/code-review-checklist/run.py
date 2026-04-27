@@ -9,12 +9,13 @@ from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent
 COMMANDS = {
-    "review_scope": SKILL_ROOT / "scripts" / "review_scope.py",
+    "review_scope": (SKILL_ROOT / "scripts" / "review_scope.py", []),
+    "review-context": (SKILL_ROOT / "scripts" / "review_scope.py", ["--context"]),
 }
 
 
 def print_usage() -> None:
-    print("usage: run.py {review_scope} [args...]", file=sys.stderr)
+    print("usage: run.py {review_scope|review-context} [args...]", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,13 +25,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     command = args.pop(0)
-    script = COMMANDS.get(command)
-    if script is None:
+    command_config = COMMANDS.get(command)
+    if command_config is None:
         print(f"unknown command: {command}", file=sys.stderr)
         print_usage()
         return 2
+    script, injected_args = command_config
 
-    return subprocess.run([sys.executable, str(script), *args], check=False).returncode
+    return subprocess.run([sys.executable, str(script), *injected_args, *args], check=False).returncode
 
 
 if __name__ == "__main__":

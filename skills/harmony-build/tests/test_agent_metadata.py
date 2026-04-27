@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import unittest
 from pathlib import Path
 
@@ -27,6 +29,14 @@ class HarmonyBuildAgentMetadataTests(unittest.TestCase):
         )
         self.assertIn(
             "Reuse cached ready baselines",
+            prompt,
+        )
+        self.assertIn(
+            "supports detect --timeout-seconds",
+            prompt,
+        )
+        self.assertIn(
+            "parse complete successful tasks output",
             prompt,
         )
         self.assertIn(

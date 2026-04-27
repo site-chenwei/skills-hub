@@ -26,6 +26,7 @@ description: Use this skill when the user asks for a review, patch review, PR re
 
 1. 先收敛范围。
    - 优先执行 `<python_cmd> <skill_root>/run.py review_scope --repo <repo> --format markdown`
+   - 需要先给审查上下文包时，执行 `<python_cmd> <skill_root>/run.py review-context --repo <repo> --format markdown`；该入口基于 `review_scope` 输出范围、风险、测试缺口和下一步，不生成或伪造 findings。
    - 在有明确 base/head 时传入 `--base <rev> [--head <rev>]`
    - 先看文件分类、风险标签、测试缺口和高改动文件，再决定补读哪些上下文。
 2. 再看真实风险。

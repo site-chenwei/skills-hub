@@ -2,8 +2,13 @@
 
 import argparse
 import json
+import os
+import re
+import signal
 import subprocess
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -372,6 +377,41 @@ PLAYWRIGHT_CONTEXT_PATTERNS = (
     "waiting for expect",
     "waiting for locator",
 )
+TAIL_CHUNK_BYTES = 8192
+MAX_TAIL_BYTES = 256 * 1024
+CLASSIFICATION_CHUNK_BYTES = 64 * 1024
+REDACTED_VALUE = "[REDACTED]"
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b([A-Z0-9_.-]*(?:API[_-]?KEY|TOKEN|PASSWORD|SECRET)[A-Z0-9_.-]*\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s,;\"']+)",
+    re.IGNORECASE,
+)
+AUTHORIZATION_BEARER_RE = re.compile(
+    r"\b(authorization\s*[:=]?\s*bearer\s+)([A-Za-z0-9._~+/=-]+)",
+    re.IGNORECASE,
+)
+BEARER_RE = re.compile(r"\b(bearer\s+)([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
+SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+CLI_SECRET_FLAG_RE = re.compile(
+    r"^-{1,2}(?:api[-_]?key|token|password|secret|authorization)$",
+    re.IGNORECASE,
+)
+CLI_SECRET_ASSIGNMENT_RE = re.compile(
+    r"^(-{1,2}(?:api[-_]?key|token|password|secret|authorization)=).+",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class CommandRunResult:
+    returncode: int
+    timed_out: bool
+    stdout_tail: list[str]
+    stderr_tail: list[str]
+    classification: dict
+    output_seen: bool
+
+
 VITE_BUILD_CONTEXT_PATTERNS = (
     "vite build",
     "vite.config",
@@ -406,6 +446,136 @@ def should_accept_pattern(category: str, pattern: str, lowered_output: str) -> b
     return True
 
 
+def classification_terms() -> set[str]:
+    terms: set[str] = set()
+    for patterns in PATTERN_GROUPS.values():
+        terms.update(patterns)
+    terms.update(PLAYWRIGHT_TIMEOUT_TERMS)
+    terms.update(PLAYWRIGHT_CONTEXT_PATTERNS)
+    terms.update(VITE_BUILD_CONTEXT_PATTERNS)
+    terms.add("vite")
+    return terms
+
+
+def should_accept_found_pattern(category: str, pattern: str, found_terms: set[str]) -> bool:
+    if category == PLAYWRIGHT_TIMEOUT_CATEGORY:
+        return bool(found_terms.intersection(PLAYWRIGHT_TIMEOUT_TERMS)) and bool(
+            found_terms.intersection(PLAYWRIGHT_CONTEXT_PATTERNS)
+        )
+    if category == REACT_BUILD_CATEGORY and pattern == "vite":
+        return bool(found_terms.intersection(VITE_BUILD_CONTEXT_PATTERNS))
+    return True
+
+
+def classification_from_matches(matches: list[tuple[str, str]]) -> dict:
+    if not matches:
+        return {"classification": "unknown", "signals": [], "secondary_matches": []}
+
+    grouped_matches: dict[str, set[str]] = {}
+    for category, pattern in matches:
+        grouped_matches.setdefault(category, set()).add(pattern)
+
+    ordered_categories = sorted(
+        grouped_matches,
+        key=lambda category: (
+            CATEGORY_PRIORITY.get(category, 99),
+            sorted(grouped_matches[category])[0],
+        ),
+    )
+    category = ordered_categories[0]
+    secondary_matches = [
+        {
+            "classification": secondary_category,
+            "signals": sorted(grouped_matches[secondary_category])[:6],
+        }
+        for secondary_category in ordered_categories[1:]
+    ]
+    return {
+        "classification": category,
+        "signals": sorted(grouped_matches[category])[:6],
+        "secondary_matches": secondary_matches,
+    }
+
+
+def classify_failure_terms(found_terms: set[str], exit_code: int) -> dict:
+    if exit_code == 0:
+        return {"classification": "success", "signals": [], "secondary_matches": []}
+
+    matches: list[tuple[str, str]] = []
+    for category, patterns in PATTERN_GROUPS.items():
+        for pattern in patterns:
+            if pattern in found_terms and should_accept_found_pattern(category, pattern, found_terms):
+                matches.append((category, pattern))
+    return classification_from_matches(matches)
+
+
+def find_classification_terms_in_text(text: str) -> set[str]:
+    lowered = text.lower()
+    return {term for term in classification_terms() if term in lowered}
+
+
+def find_classification_terms_in_files(paths: list[Path]) -> set[str]:
+    terms = classification_terms()
+    remaining = set(terms)
+    found: set[str] = set()
+    overlap_length = max((len(term) for term in terms), default=1) - 1
+
+    for path in paths:
+        previous = ""
+        with path.open("rb") as handle:
+            while remaining:
+                chunk = handle.read(CLASSIFICATION_CHUNK_BYTES)
+                if not chunk:
+                    break
+                lowered = previous + chunk.decode("utf-8", errors="replace").lower()
+                hits = {term for term in remaining if term in lowered}
+                found.update(hits)
+                remaining.difference_update(hits)
+                previous = lowered[-overlap_length:] if overlap_length > 0 else ""
+    return found
+
+
+def classify_failure_files(paths: list[Path], exit_code: int) -> dict:
+    return classify_failure_terms(find_classification_terms_in_files(paths), exit_code)
+
+
+def redact_secrets(text: str) -> str:
+    redacted = SECRET_ASSIGNMENT_RE.sub(r"\1" + REDACTED_VALUE, text)
+    redacted = AUTHORIZATION_BEARER_RE.sub(r"\1" + REDACTED_VALUE, redacted)
+    redacted = BEARER_RE.sub(r"\1" + REDACTED_VALUE, redacted)
+    return SK_TOKEN_RE.sub(REDACTED_VALUE, redacted)
+
+
+def redact_command(command: list[str]) -> list[str]:
+    redacted_command: list[str] = []
+    redact_next = False
+    for arg in command:
+        if redact_next:
+            redacted_command.append(REDACTED_VALUE)
+            redact_next = False
+            continue
+
+        assignment_match = CLI_SECRET_ASSIGNMENT_RE.match(arg)
+        if assignment_match:
+            redacted_command.append(f"{assignment_match.group(1)}{REDACTED_VALUE}")
+            continue
+
+        redacted_command.append(redact_secrets(arg))
+        if CLI_SECRET_FLAG_RE.match(arg):
+            redact_next = True
+    return redacted_command
+
+
+def sanitize_report(report: dict) -> dict:
+    sanitized = dict(report)
+    sanitized["command"] = redact_command(list(report.get("command", [])))
+    for key in ("stdout_tail", "stderr_tail"):
+        sanitized[key] = [redact_secrets(line) for line in report.get(key, [])]
+    if isinstance(report.get("error"), str):
+        sanitized["error"] = redact_secrets(report["error"])
+    return sanitized
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a command and capture structured failure context.")
     parser.add_argument("--cwd", default=".", help="Working directory for the command.")
@@ -428,42 +598,34 @@ def tail_lines(text: str, limit: int) -> list[str]:
     return lines[-limit:]
 
 
+def tail_file_lines(path: Path, limit: int, max_bytes: int = MAX_TAIL_BYTES) -> list[str]:
+    if limit <= 0:
+        return []
+
+    chunks: list[bytes] = []
+    newline_count = 0
+    bytes_collected = 0
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        while position > 0 and newline_count <= limit and bytes_collected < max_bytes:
+            read_size = min(TAIL_CHUNK_BYTES, position, max_bytes - bytes_collected)
+            position -= read_size
+            handle.seek(position)
+            chunk = handle.read(read_size)
+            chunks.append(chunk)
+            newline_count += chunk.count(b"\n")
+            bytes_collected += len(chunk)
+
+    if not chunks:
+        return []
+
+    tail_text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+    return tail_lines(tail_text, limit)
+
+
 def classify_failure_details(output_text: str, exit_code: int) -> dict:
-    if exit_code == 0:
-        return {"classification": "success", "signals": [], "secondary_matches": []}
-
-    lowered = output_text.lower()
-    matches: list[tuple[str, str]] = []
-    for category, patterns in PATTERN_GROUPS.items():
-        for pattern in patterns:
-            if should_accept_pattern(category, pattern, lowered) and pattern in lowered:
-                matches.append((category, pattern))
-    if matches:
-        grouped_matches: dict[str, set[str]] = {}
-        for category, pattern in matches:
-            grouped_matches.setdefault(category, set()).add(pattern)
-
-        ordered_categories = sorted(
-            grouped_matches,
-            key=lambda category: (
-                CATEGORY_PRIORITY.get(category, 99),
-                sorted(grouped_matches[category])[0],
-            ),
-        )
-        category = ordered_categories[0]
-        secondary_matches = [
-            {
-                "classification": secondary_category,
-                "signals": sorted(grouped_matches[secondary_category])[:6],
-            }
-            for secondary_category in ordered_categories[1:]
-        ]
-        return {
-            "classification": category,
-            "signals": sorted(grouped_matches[category])[:6],
-            "secondary_matches": secondary_matches,
-        }
-    return {"classification": "unknown", "signals": [], "secondary_matches": []}
+    return classify_failure_terms(find_classification_terms_in_text(output_text), exit_code)
 
 
 def classify_failure(output_text: str, exit_code: int) -> tuple[str, list[str]]:
@@ -471,18 +633,101 @@ def classify_failure(output_text: str, exit_code: int) -> tuple[str, list[str]]:
     return details["classification"], details["signals"]
 
 
-def run_command(command: list[str], cwd: Path, timeout: int) -> tuple[subprocess.CompletedProcess, float]:
+def popen_kwargs_for_process_group() -> dict:
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": creation_flag} if creation_flag else {}
+    return {"start_new_session": True}
+
+
+def terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+
+    def bounded_wait_after_kill() -> None:
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except OSError:
+            process.kill()
+        except subprocess.TimeoutExpired:
+            process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            bounded_wait_after_kill()
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        process.terminate()
+
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            process.kill()
+        bounded_wait_after_kill()
+
+
+def run_command(command: list[str], cwd: Path, timeout: int, line_limit: int) -> tuple[CommandRunResult, float]:
     started_at = time.monotonic()
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
-    return result, time.monotonic() - started_at
+    with tempfile.TemporaryDirectory(prefix="capture-failure-") as temp_dir:
+        stdout_path = Path(temp_dir) / "stdout.log"
+        stderr_path = Path(temp_dir) / "stderr.log"
+        with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                **popen_kwargs_for_process_group(),
+            )
+            try:
+                returncode = process.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                terminate_process_tree(process)
+                returncode = 124
+
+        duration = time.monotonic() - started_at
+        should_keep_tail = timed_out or returncode != 0
+        output_seen = stdout_path.stat().st_size > 0 or stderr_path.stat().st_size > 0
+        classification = (
+            classify_failure_files([stdout_path, stderr_path], returncode)
+            if should_keep_tail
+            else classify_failure_details("", 0)
+        )
+        stdout_tail = tail_file_lines(stdout_path, line_limit) if should_keep_tail else []
+        stderr_tail = tail_file_lines(stderr_path, line_limit) if should_keep_tail else []
+        return CommandRunResult(
+            returncode,
+            timed_out,
+            stdout_tail,
+            stderr_tail,
+            classification,
+            output_seen,
+        ), duration
 
 
 def build_os_error_report(command: list[str], cwd: Path, timeout: int, line_limit: int, exc: OSError) -> dict:
@@ -501,7 +746,7 @@ def build_os_error_report(command: list[str], cwd: Path, timeout: int, line_limi
         category = "environment"
         signals = [signal]
         secondary_matches = []
-    return {
+    return sanitize_report({
         "command": command,
         "cwd": str(cwd.resolve()),
         "timeout_seconds": timeout,
@@ -512,66 +757,80 @@ def build_os_error_report(command: list[str], cwd: Path, timeout: int, line_limi
         "classification": category,
         "signals": signals,
         "secondary_matches": secondary_matches,
+        "error": error_text,
         "stdout_tail": [],
         "stderr_tail": tail_lines(error_text, line_limit),
         "next_steps": NEXT_STEPS.get(category, NEXT_STEPS["unknown"]),
-    }
+    })
 
 
 def build_report(command: list[str], cwd: Path, timeout: int, line_limit: int) -> dict:
     try:
-        result, duration = run_command(command, cwd, timeout)
-        timed_out = False
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        combined = "\n".join(part for part in [stdout, stderr] if part)
-        classification = classify_failure_details(combined, 124)
+        result, duration = run_command(command, cwd, timeout, line_limit)
+    except OSError as exc:
+        return build_os_error_report(command, cwd, timeout, line_limit, exc)
+
+    classification = result.classification
+    if result.timed_out:
         if classification["classification"] == "unknown":
-            timeout_signal = "timeout_expired_no_output" if not combined.strip() else "timeout"
+            timeout_signal = "timeout_expired_no_output" if not result.output_seen else "timeout"
             classification = {
                 "classification": "command-timeout",
                 "signals": [timeout_signal],
                 "secondary_matches": [],
             }
-        return {
+        return sanitize_report({
             "command": command,
             "cwd": str(cwd.resolve()),
             "timeout_seconds": timeout,
-            "duration_seconds": round(float(timeout), 3),
+            "duration_seconds": round(duration, 3),
             "success": False,
             "timed_out": True,
             "exit_code": 124,
             "classification": classification["classification"],
             "signals": classification["signals"],
             "secondary_matches": classification["secondary_matches"],
-            "stdout_tail": tail_lines(stdout, line_limit),
-            "stderr_tail": tail_lines(stderr, line_limit),
+            "stdout_tail": result.stdout_tail,
+            "stderr_tail": result.stderr_tail,
             "next_steps": NEXT_STEPS.get(classification["classification"], NEXT_STEPS["unknown"]),
-        }
-    except OSError as exc:
-        return build_os_error_report(command, cwd, timeout, line_limit, exc)
+        })
 
-    combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
-    classification = classify_failure_details(combined, result.returncode)
-    return {
+    if result.returncode == 0:
+        return sanitize_report({
+            "command": command,
+            "cwd": str(cwd.resolve()),
+            "timeout_seconds": timeout,
+            "duration_seconds": round(duration, 3),
+            "success": True,
+            "timed_out": False,
+            "exit_code": 0,
+            "classification": classification["classification"],
+            "signals": classification["signals"],
+            "secondary_matches": classification["secondary_matches"],
+            "stdout_tail": [],
+            "stderr_tail": [],
+            "next_steps": NEXT_STEPS.get(classification["classification"], NEXT_STEPS["unknown"]),
+        })
+
+    return sanitize_report({
         "command": command,
         "cwd": str(cwd.resolve()),
         "timeout_seconds": timeout,
         "duration_seconds": round(duration, 3),
-        "success": result.returncode == 0,
-        "timed_out": timed_out,
+        "success": False,
+        "timed_out": False,
         "exit_code": result.returncode,
         "classification": classification["classification"],
         "signals": classification["signals"],
         "secondary_matches": classification["secondary_matches"],
-        "stdout_tail": tail_lines(result.stdout, line_limit),
-        "stderr_tail": tail_lines(result.stderr, line_limit),
+        "stdout_tail": result.stdout_tail,
+        "stderr_tail": result.stderr_tail,
         "next_steps": NEXT_STEPS.get(classification["classification"], NEXT_STEPS["unknown"]),
-    }
+    })
 
 
 def render_markdown(report: dict) -> str:
+    report = sanitize_report(report)
     lines = [
         f"命令：{' '.join(report['command'])}",
         f"工作目录：{report['cwd']}",
@@ -589,6 +848,8 @@ def render_markdown(report: dict) -> str:
         for match in report["secondary_matches"]:
             signals = ", ".join(match.get("signals", [])) or "未识别"
             lines.append(f"- {match['classification']}: {signals}")
+    if report["success"]:
+        return "\n".join(lines)
     lines.append("stderr 尾部：")
     if report["stderr_tail"]:
         for line in report["stderr_tail"]:

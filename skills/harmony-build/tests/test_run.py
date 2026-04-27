@@ -19,6 +19,21 @@ class HarmonyBuildRunnerTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("usage: harmony_build.py detect", proc.stdout)
+        self.assertIn("--timeout-seconds", proc.stdout)
+
+    def test_runner_forwards_auxiliary_harmony_commands(self) -> None:
+        for command in ["doctor", "recommend-task", "list-tasks", "build"]:
+            with self.subTest(command=command):
+                proc = subprocess.run(
+                    [sys.executable, str(RUNNER_PATH), command, "--help"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(f"usage: harmony_build.py {command}", proc.stdout)
 
 
 if __name__ == "__main__":

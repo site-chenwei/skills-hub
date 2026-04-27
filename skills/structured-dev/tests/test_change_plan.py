@@ -1,9 +1,14 @@
 import importlib.util
+import io
+import json
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "change_plan.py"
@@ -68,6 +73,39 @@ class ChangePlanTests(unittest.TestCase):
         self.assertIn("skills/harmony-build", plan["modules"])
         self.assertIn("project-onboarding", plan["recommended_skill_chain"])
         self.assertIn("code-review-checklist", plan["recommended_skill_chain"])
+
+    def test_build_plan_classifies_directory_paths_by_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "web" / "src" / "routes").mkdir(parents=True)
+            (repo / "web" / "src" / "routes" / "account.tsx").write_text(
+                "export function Account() { return null; }\n",
+                encoding="utf-8",
+            )
+            (repo / "web" / "src" / "components").mkdir(parents=True)
+            (repo / "web" / "src" / "components" / "Button.tsx").write_text(
+                "export function Button() { return null; }\n",
+                encoding="utf-8",
+            )
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 web 目录",
+                paths=["web/src"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            plan = CHANGE_PLAN.build_plan(repo, args)
+
+        self.assertEqual(plan["paths"], ["web/src"])
+        self.assertNotIn("other", plan["path_categories"])
+        self.assertIn("react-high-risk", plan["path_categories"])
+        self.assertIn("web", plan["modules"])
+        self.assertTrue(any("React Web 高风险" in item for item in plan["validation_expectations"]))
 
     def test_build_plan_marks_outside_repo_paths_instead_of_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -313,6 +351,141 @@ class ChangePlanTests(unittest.TestCase):
         self.assertEqual(plan["outside_repo_paths"], ["C:/tmp/file.ts"])
         self.assertEqual(plan["modules"], ["(outside repo)"])
         self.assertEqual(plan["mode"], "full")
+
+    def test_build_task_intake_combines_project_facts_and_plan_without_running_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Intake Demo\n", encoding="utf-8")
+            (repo / "src").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (repo / "tests" / "test_app.py").write_text("import unittest\n", encoding="utf-8")
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 Python 逻辑",
+                paths=["src/app.py"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            package = CHANGE_PLAN.build_task_intake(repo, args)
+
+        self.assertEqual(package["package_type"], "task-intake")
+        self.assertEqual(package["not_executed"], ["implementation", "validation"])
+        self.assertEqual(package["plan"]["mode"], "light")
+        self.assertEqual(package["facts"]["summary"], "Intake Demo")
+        self.assertTrue(package["validation_candidates"]["not_executed"])
+        commands = {item["command"] for item in package["validation_candidates"]["commands"]}
+        self.assertIn("<python_cmd> -m unittest discover", commands)
+
+    def test_build_task_intake_includes_skill_module_unittest_start_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Skills Demo\n", encoding="utf-8")
+            skill = repo / "skills" / "alpha-skill"
+            (skill / "tests").mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: alpha-skill\ndescription: Demo.\n---\n", encoding="utf-8")
+            (skill / "run.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+            (skill / "tests" / "test_alpha.py").write_text(
+                "import unittest\n\nclass AlphaTests(unittest.TestCase):\n    pass\n",
+                encoding="utf-8",
+            )
+
+            args = SimpleNamespace(
+                repo=str(repo),
+                goal="调整 Skill",
+                paths=["skills/alpha-skill"],
+                interface_change=False,
+                dependency_change=False,
+                schema_change=False,
+                security_sensitive=False,
+                performance_sensitive=False,
+                bugfix=False,
+            )
+            package = CHANGE_PLAN.build_task_intake(repo, args)
+
+        commands = {item["command"] for item in package["validation_candidates"]["commands"]}
+        self.assertIn("cd skills/alpha-skill && <python_cmd> -m unittest discover -s tests", commands)
+        self.assertNotIn("cd skills/alpha-skill && <python_cmd> -m unittest discover", commands)
+
+    def test_load_project_facts_module_reports_missing_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_script = Path(temp_dir) / "structured-dev" / "scripts" / "change_plan.py"
+            fake_script.parent.mkdir(parents=True)
+
+            with mock.patch.object(CHANGE_PLAN, "__file__", str(fake_script)):
+                module, error = CHANGE_PLAN.load_project_facts_module()
+
+        self.assertIsNone(module)
+        self.assertIn("未找到 project_facts 辅助脚本", error)
+
+    def test_collect_project_facts_reports_helper_load_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_script = root / "structured-dev" / "scripts" / "change_plan.py"
+            helper = root / "project-onboarding" / "scripts" / "project_facts.py"
+            fake_script.parent.mkdir(parents=True)
+            helper.parent.mkdir(parents=True)
+            helper.write_text("raise RuntimeError('load boom')\n", encoding="utf-8")
+
+            with mock.patch.object(CHANGE_PLAN, "__file__", str(fake_script)):
+                facts, error = CHANGE_PLAN.collect_project_facts(root)
+
+        self.assertIsNone(facts)
+        self.assertIn("project_facts 辅助脚本加载失败", error)
+        self.assertIn("load boom", error)
+
+    def test_collect_project_facts_reports_scan_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_script = root / "structured-dev" / "scripts" / "change_plan.py"
+            helper = root / "project-onboarding" / "scripts" / "project_facts.py"
+            fake_script.parent.mkdir(parents=True)
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "def collect_facts(repo):\n    raise RuntimeError('scan boom')\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(CHANGE_PLAN, "__file__", str(fake_script)):
+                facts, error = CHANGE_PLAN.collect_project_facts(root)
+
+        self.assertIsNone(facts)
+        self.assertIn("project_facts 扫描失败", error)
+        self.assertIn("scan boom", error)
+
+    def test_task_intake_main_returns_nonzero_when_project_facts_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Intake Failure\n", encoding="utf-8")
+            argv = [
+                "change_plan.py",
+                "--task-intake",
+                "--repo",
+                str(repo),
+                "--goal",
+                "准备执行包",
+                "--paths",
+                "README.md",
+                "--format",
+                "json",
+            ]
+            stdout = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                CHANGE_PLAN,
+                "collect_project_facts",
+                return_value=(None, "project_facts 扫描失败：scan boom"),
+            ), redirect_stdout(stdout):
+                return_code = CHANGE_PLAN.main()
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(return_code, 1)
+        self.assertIsNone(payload["facts"])
+        self.assertEqual(payload["facts_error"], "project_facts 扫描失败：scan boom")
 
 
 if __name__ == "__main__":

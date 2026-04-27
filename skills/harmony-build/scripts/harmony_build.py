@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -18,10 +21,12 @@ from pathlib import Path
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 SKILL_RUNTIME_ROOT_ENV = "SKILLS_HUB_RUNTIME_DIR"
 SKILL_CACHE_DIR_NAME = "harmony-build"
 HVIGOR_TASK_TIMEOUT_SECONDS = 900
+HVIGOR_TASK_LIST_TIMEOUT_SECONDS = 120
+HVIGOR_PREFLIGHT_TIMEOUT_SECONDS = HVIGOR_TASK_LIST_TIMEOUT_SECONDS
 HVIGOR_OUTPUT_TAIL_LINES = 80
 HVIGOR_OUTPUT_TAIL_BYTES = 128 * 1024
 PROJECT_MARKERS = (
@@ -49,6 +54,16 @@ VERSION_PROBES = {
 }
 SDK_COMPONENT_MARKERS = ("ets", "js", "native", "toolchains", "kits", "api")
 MODULE_CONFIG_FILES = {"build-profile.json5", "oh-package.json5", "hvigorfile.ts", "hvigorfile.js"}
+RUNTIME_OS_RE = re.compile(r"""["']?runtimeOS["']?\s*:\s*["']([^"']+)["']""")
+PROJECT_CONFIG_IGNORED_DIRS = {".git", ".hvigor", "build", "node_modules", "oh_modules"}
+TASK_LINE_RE = re.compile(r"^\s*([:\w.-]+)\s+-\s+")
+BUILD_TASK_PREFERENCE = (
+    "assembleHap",
+    "assembleApp",
+    "PackageApp",
+    "SignPackagesFromApp",
+    "build",
+)
 
 
 def strip_ansi(text: str) -> str:
@@ -101,6 +116,55 @@ def combine_process_output(stdout: str | bytes | None, stderr: str | bytes | Non
         if value.strip():
             parts.append(value.strip())
     return "\n".join(parts)
+
+
+def strip_json5_comments(text: str) -> str:
+    result = []
+    index = 0
+    quote = None
+    escaped = False
+    length = len(text)
+
+    while index < length:
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < length else ""
+
+        if quote:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+
+        if char in {"'", '"'}:
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            continue
+
+        if char == "/" and next_char == "*":
+            index += 2
+            while index < length - 1 and not (text[index] == "*" and text[index + 1] == "/"):
+                if text[index] in "\r\n":
+                    result.append(text[index])
+                index += 1
+            index = min(index + 2, length)
+            continue
+
+        result.append(char)
+        index += 1
+
+    return "".join(result)
 
 
 def now_iso_utc() -> str:
@@ -244,16 +308,29 @@ def is_cached_detection_usable(result: dict | None, repo_info: dict) -> tuple[bo
         return False, "repo_mismatch"
     if not result.get("ready"):
         return False, "not_ready"
+    runtime_os = read_project_runtime_os(Path(repo_info.get("local_path") or ""))
+    sdk_family = sdk_family_from_runtime_os(runtime_os)
+    sdk_home = resolved.get("sdk_home")
+    if sdk_family == "harmonyos" and sdk_root_kind(Path(sdk_home or "")) != "harmonyos":
+        return False, "sdk_family_mismatch"
 
-    checks = [
+    existence_checks = [
         ("repo_local_path", cached_repo.get("local_path")),
-        ("node_path", resolved.get("node_path")),
-        ("sdk_home", resolved.get("sdk_home")),
-        ("hvigor_path", resolved.get("hvigor_path")),
+        ("sdk_home", sdk_home),
     ]
-    for label, path_text in checks:
+    for label, path_text in existence_checks:
         if not host_path_exists(path_text):
             return False, f"missing_{label}"
+
+    executable_checks = [
+        ("node_path", resolved.get("node_path")),
+        ("hvigor_path", resolved.get("hvigor_path")),
+    ]
+    for label, path_text in executable_checks:
+        if not host_path_exists(path_text):
+            return False, f"missing_{label}"
+        if not is_executable_file(Path(path_text).expanduser()):
+            return False, f"not_executable_{label}"
 
     if not (result.get("preflight") or {}).get("success"):
         return False, "missing_ready_preflight"
@@ -364,6 +441,32 @@ def detect_project_markers(repo: Path) -> list[str]:
     return markers
 
 
+def iter_project_config_files(repo: Path, filename: str):
+    if not repo.exists() or not repo.is_dir():
+        return
+    direct = repo / filename
+    if direct.is_file():
+        yield direct
+    for root_text, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [dirname for dirname in dirnames if dirname not in PROJECT_CONFIG_IGNORED_DIRS]
+        root = Path(root_text)
+        if root == repo or filename not in filenames:
+            continue
+        yield root / filename
+
+
+def read_project_runtime_os(repo: Path) -> str | None:
+    for path in iter_project_config_files(repo, "build-profile.json5") or []:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = RUNTIME_OS_RE.search(strip_json5_comments(text))
+        if match:
+            return match.group(1).strip()
+    return None
+
+
 def candidate_node_paths() -> list[str]:
     candidates = []
     node_home = os.environ.get("NODE_HOME")
@@ -465,6 +568,48 @@ def looks_like_sdk_root(path: Path) -> bool:
     return bool(set(SDK_COMPONENT_MARKERS) & child_names)
 
 
+def sdk_component_root_has_manifest(path: Path) -> bool:
+    manifests = ("uni-package.json", "oh-uni-package.json")
+    return any((path / component / manifest).is_file() for component in SDK_COMPONENT_MARKERS for manifest in manifests)
+
+
+def looks_like_openharmony_sdk_root(path: Path) -> bool:
+    return looks_like_sdk_root(path) and sdk_component_root_has_manifest(path)
+
+
+def harmonyos_sdk_component_roots(path: Path) -> tuple[Path, Path]:
+    default_root = path / "default"
+    if (default_root / "hms").is_dir() or (default_root / "openharmony").is_dir():
+        return default_root / "hms", default_root / "openharmony"
+    return path / "hms", path / "openharmony"
+
+
+def looks_like_harmonyos_sdk_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    hms_root, openharmony_root = harmonyos_sdk_component_roots(path)
+    return looks_like_sdk_root(hms_root) and looks_like_sdk_root(openharmony_root)
+
+
+def sdk_root_kind(path: Path) -> str | None:
+    if looks_like_harmonyos_sdk_root(path):
+        return "harmonyos"
+    if looks_like_openharmony_sdk_root(path):
+        return "openharmony"
+    return None
+
+
+def sdk_family_from_runtime_os(runtime_os: str | None) -> str | None:
+    if not runtime_os:
+        return None
+    normalized = runtime_os.strip().lower()
+    if normalized == "harmonyos":
+        return "harmonyos"
+    if normalized == "openharmony":
+        return "openharmony"
+    return None
+
+
 def candidate_sdk_roots() -> list[str]:
     candidates = []
     for key in SDK_ENV_KEYS:
@@ -493,18 +638,33 @@ def candidate_sdk_roots() -> list[str]:
     expanded = []
     for candidate in unique_values(str(path.resolve()) for path in candidates if path.exists()):
         path = Path(candidate)
-        if looks_like_sdk_root(path):
+        kind = sdk_root_kind(path)
+        if kind:
             expanded.append(str(path))
+            if kind == "harmonyos":
+                continue
         if path.is_dir():
             for child in sorted(path.iterdir()):
-                if child.is_dir() and looks_like_sdk_root(child):
+                if child.is_dir() and sdk_root_kind(child):
                     expanded.append(str(child.resolve()))
     return unique_values(expanded)
 
 
-def resolve_sdk_root() -> tuple[str | None, list[str]]:
+def select_sdk_root(candidates: list[str], sdk_family: str | None) -> str | None:
+    if sdk_family == "harmonyos":
+        return next((item for item in candidates if sdk_root_kind(Path(item)) == "harmonyos"), None)
+    if sdk_family == "openharmony":
+        return next(
+            (item for item in candidates if sdk_root_kind(Path(item)) == "openharmony"),
+            next((item for item in candidates if sdk_root_kind(Path(item)) == "harmonyos"), None),
+        )
+    return candidates[0] if candidates else None
+
+
+def resolve_sdk_root(repo: Path | None = None) -> tuple[str | None, list[str]]:
     candidates = candidate_sdk_roots()
-    return (candidates[0] if candidates else None), candidates
+    runtime_os = read_project_runtime_os(repo) if repo else None
+    return select_sdk_root(candidates, sdk_family_from_runtime_os(runtime_os)), candidates
 
 
 def candidate_hvigor_paths(repo: Path) -> list[str]:
@@ -643,6 +803,7 @@ def describe_sdk_root(path_text: str) -> dict:
         "path": path_text,
         "exists": path.exists(),
         "api": sdk_api_from_path(path),
+        "kind": sdk_root_kind(path),
         "components": [],
     }
     if not path.exists() or not path.is_dir():
@@ -712,6 +873,8 @@ def print_doctor_report(report: dict) -> None:
     print(f"Harmony SDK selected: {sdk.get('selected') or 'NOT FOUND'}")
     for candidate in sdk.get("candidates") or []:
         parts = [candidate["path"]]
+        if candidate.get("kind"):
+            parts.append(f"kind={candidate['kind']}")
         if candidate.get("api"):
             parts.append(f"api={candidate['api']}")
         if candidate.get("components"):
@@ -834,9 +997,113 @@ def print_task_recommendations(result: dict) -> None:
         print(result["list_tasks_hint"])
 
 
+def extract_public_tasks(tasks_output: str) -> list[str]:
+    tasks = []
+    seen = set()
+    for line in strip_ansi(tasks_output).splitlines():
+        match = TASK_LINE_RE.match(line)
+        if not match:
+            continue
+        task = match.group(1)
+        if task in seen:
+            continue
+        seen.add(task)
+        tasks.append(task)
+    return tasks
+
+
+def select_build_task(public_tasks: list[str], recommendations: dict | None = None) -> tuple[str | None, str]:
+    task_set = set(public_tasks)
+    if recommendations:
+        for item in recommendations.get("recommendations") or []:
+            template = item.get("task_template")
+            if template and template in task_set and not template.startswith("<"):
+                return template, f"selected path recommendation for {item.get('path')}"
+
+    for preferred in BUILD_TASK_PREFERENCE:
+        if preferred in task_set:
+            return preferred, "selected preferred public build task from hvigor tasks"
+    return None, "no public build task matched known build task names"
+
+
+def build_selection_failure(
+    message: str,
+    *,
+    exit_code: int = 2,
+    timed_out: bool = False,
+    duration_seconds: float | None = None,
+    phase: str | None = None,
+    task: str | None = None,
+) -> dict:
+    result = {
+        "success": False,
+        "exit_code": exit_code,
+        "output": message,
+        "timed_out": timed_out,
+    }
+    if duration_seconds is not None:
+        result["duration_seconds"] = duration_seconds
+    if phase:
+        result["phase"] = phase
+    if task:
+        result["task"] = task
+    return result
+
+
+def annotate_hvigor_outcome(outcome: dict, *, phase: str, task: str) -> dict:
+    annotated = dict(outcome)
+    annotated.setdefault("phase", phase)
+    annotated.setdefault("task", task)
+    return annotated
+
+
+def remaining_timeout_seconds(started_at: float, timeout_seconds: int) -> int:
+    remaining = timeout_seconds - (time.monotonic() - started_at)
+    if remaining <= 0:
+        return 0
+    return max(1, math.ceil(remaining))
+
+
+def build_deadline_failure(started_at: float, timeout_seconds: int, phase: str, task: str | None = None) -> dict:
+    duration_seconds = round(time.monotonic() - started_at, 3)
+    target = f" before {phase}"
+    if task:
+        target += f" `{task}`"
+    return build_selection_failure(
+        f"Build flow timed out{target} after {timeout_seconds} seconds.",
+        exit_code=124,
+        timed_out=True,
+        duration_seconds=duration_seconds,
+        phase=phase,
+        task=task,
+    )
+
+
+def emit_build_progress(progress, phase: str, message: str) -> None:
+    if progress:
+        progress(f"[harmony-build] {phase}: {message}")
+
+
+def compact_build_result_for_agent(result: dict) -> dict:
+    compact = dict(result)
+    verification = dict(compact.get("verification") or {})
+    if verification.get("success"):
+        verification["output"] = ""
+    compact["verification"] = verification
+
+    task_list = compact.get("task_list")
+    if isinstance(task_list, dict) and task_list.get("success"):
+        compact_task_list = dict(task_list)
+        compact_task_list["output"] = ""
+        compact["task_list"] = compact_task_list
+    return compact
+
+
 def validate_hvigor_task(task: str) -> str | None:
     if not task or not task.strip():
         return "hvigor task must not be empty"
+    if task.strip().startswith("-"):
+        return "hvigor task must not start with '-' because option-like values are not public task names"
     if any(char in task for char in "\r\n\x00"):
         return "hvigor task must not contain control characters"
     if "@" in task:
@@ -845,6 +1112,10 @@ def validate_hvigor_task(task: str) -> str | None:
             "such as ':entry:default@CompileArkTS'"
         )
     return None
+
+
+def should_save_ready_baseline_for_task(task: str | None) -> bool:
+    return (task or "").strip() != "tasks"
 
 
 def read_file_tail(path: Path, *, max_lines: int = HVIGOR_OUTPUT_TAIL_LINES, max_bytes: int = HVIGOR_OUTPUT_TAIL_BYTES) -> str:
@@ -864,6 +1135,12 @@ def read_file_tail(path: Path, *, max_lines: int = HVIGOR_OUTPUT_TAIL_LINES, max
         lines = lines[1:]
     lines = [line for line in lines if line.strip()]
     return "\n".join(lines[-max_lines:])
+
+
+def read_file_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def clean_hvigor_output(text: str) -> str:
@@ -888,11 +1165,27 @@ def terminate_process_tree(process: subprocess.Popen) -> str | None:
                 return f"taskkill.exe exited with code {result.returncode}"
         else:
             os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
+        try:
+            process.wait(timeout=10)
+            return None
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+                return "hvigor process tree required SIGKILL after SIGTERM timeout."
+            process.kill()
+            process.wait(timeout=5)
+            return "hvigor process required kill after taskkill timeout."
+        return None
+    except ProcessLookupError:
         return None
     except Exception as error:
         try:
-            process.kill()
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait(timeout=5)
         except Exception:
             pass
         return f"failed to terminate hvigor process tree: {error}"
@@ -907,7 +1200,11 @@ def run_hvigor_task(
     *,
     node_home: str | None = None,
     java_home: str | None = None,
+    output_mode: str = "tail",
 ) -> dict:
+    if output_mode not in {"tail", "full", "full-on-success"}:
+        raise ValueError("output_mode must be one of: tail, full, full-on-success")
+
     task_error = validate_hvigor_task(task)
     if task_error:
         return {
@@ -966,7 +1263,14 @@ def run_hvigor_task(
                 cleanup_error = terminate_process_tree(process)
 
             log_file.flush()
-        output = clean_hvigor_output(read_file_tail(log_path)).strip() if log_path else ""
+        read_full_output = output_mode == "full" or (output_mode == "full-on-success" and exit_code == 0 and not timed_out)
+        if not log_path:
+            raw_output = ""
+        elif read_full_output:
+            raw_output = read_file_text(log_path)
+        else:
+            raw_output = read_file_tail(log_path)
+        output = clean_hvigor_output(raw_output).strip()
     except OSError as error:
         return {
             "success": False,
@@ -1006,13 +1310,16 @@ def detect_environment_for_repo(
     repo_info: dict,
     *,
     preflight: bool,
-    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+    timeout_seconds: int = HVIGOR_PREFLIGHT_TIMEOUT_SECONDS,
+    progress=None,
 ) -> dict:
     repo = Path(repo_info["local_path"])
     project_markers = detect_project_markers(repo)
+    runtime_os = read_project_runtime_os(repo)
+    sdk_family = sdk_family_from_runtime_os(runtime_os)
     node_home, node_path, node_candidates = resolve_node()
     java_home, java_path, java_candidates = resolve_java()
-    sdk_home, sdk_candidates = resolve_sdk_root()
+    sdk_home, sdk_candidates = resolve_sdk_root(repo)
     hvigor_path, hvigor_candidates, hvigor_kind = resolve_hvigor_path(repo)
     ohpm_path, ohpm_candidates = resolve_optional_tool("ohpm")
     hdc_path, hdc_candidates = resolve_optional_tool("hdc")
@@ -1028,6 +1335,8 @@ def detect_environment_for_repo(
     preflight_result = None
     ready = static_ready
     if preflight and static_ready:
+        if progress:
+            progress(f"[harmony-build] preflight: running `hvigor tasks` with timeout {timeout_seconds}s")
         preflight_result = run_hvigor_task(
             repo_info["local_path"],
             sdk_home,
@@ -1049,6 +1358,11 @@ def detect_environment_for_repo(
         blockers.append("node_missing")
     if not sdk_home:
         blockers.append("sdk_missing")
+        if sdk_family == "harmonyos" and sdk_candidates:
+            blocker_details["sdk_missing"] = (
+                "Project runtimeOS is HarmonyOS; select a DevEco HarmonyOS SDK root containing "
+                "both hms and openharmony components, not only an OpenHarmony API SDK directory."
+            )
     if not hvigor_path:
         blockers.append("hvigor_missing_or_not_executable")
         hint = hvigorw_permission_hint(repo)
@@ -1068,6 +1382,7 @@ def detect_environment_for_repo(
         "project": {
             "markers": project_markers,
             "is_harmony_project": bool(project_markers),
+            "runtime_os": runtime_os,
         },
         "resolved": {
             "node_home": node_home,
@@ -1096,8 +1411,13 @@ def detect_environment_for_repo(
     }
 
 
-def detect_environment(repo_arg: str | None, *, preflight: bool) -> dict:
-    return detect_environment_for_repo(resolve_repo_paths(repo_arg), preflight=preflight)
+def detect_environment(
+    repo_arg: str | None,
+    *,
+    preflight: bool,
+    timeout_seconds: int = HVIGOR_PREFLIGHT_TIMEOUT_SECONDS,
+) -> dict:
+    return detect_environment_for_repo(resolve_repo_paths(repo_arg), preflight=preflight, timeout_seconds=timeout_seconds)
 
 
 def resolve_detection(
@@ -1106,7 +1426,8 @@ def resolve_detection(
     preflight: bool,
     refresh: bool,
     allow_cache: bool,
-    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+    timeout_seconds: int = HVIGOR_PREFLIGHT_TIMEOUT_SECONDS,
+    progress=None,
 ) -> dict:
     repo_info = resolve_repo_paths(repo_arg)
     cache_path = cache_file_for_repo(repo_info)
@@ -1116,7 +1437,12 @@ def resolve_detection(
         if cached_result:
             return cached_result
 
-    result = detect_environment_for_repo(repo_info, preflight=preflight, timeout_seconds=timeout_seconds)
+    result = detect_environment_for_repo(
+        repo_info,
+        preflight=preflight,
+        timeout_seconds=timeout_seconds,
+        progress=progress,
+    )
     if preflight and result["ready"]:
         result["cache"] = save_cached_detection(result)
     else:
@@ -1150,6 +1476,7 @@ def print_detection(result: dict) -> None:
     print(f"Repo local path: {repo['local_path']}")
     print(f"Repo local exists: {'yes' if repo['local_exists'] else 'no'}")
     print(f"Harmony project markers: {', '.join(project.get('markers') or []) or 'NOT FOUND'}")
+    print(f"Project runtimeOS: {project.get('runtime_os') or 'UNKNOWN'}")
     print(f"Node: {resolved['node_path'] or 'NOT FOUND'}")
     print(f"JAVA_HOME: {resolved['java_home'] or 'NOT FOUND'}")
     print(f"Java: {resolved['java_path'] or 'NOT FOUND'}")
@@ -1204,7 +1531,13 @@ def print_env_snippet(result: dict) -> None:
     print(f"cd {sh_literal(repo['local_path'])}")
 
 
-def verify_task(result: dict, task: str, timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS) -> dict:
+def verify_task(
+    result: dict,
+    task: str,
+    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+    *,
+    full_output: bool = False,
+) -> dict:
     repo = result["repo"]
     resolved = result["resolved"]
     if not result["ready"]:
@@ -1222,7 +1555,262 @@ def verify_task(result: dict, task: str, timeout_seconds: int = HVIGOR_TASK_TIME
         timeout_seconds,
         node_home=resolved.get("node_home"),
         java_home=resolved.get("java_home"),
+        output_mode="full-on-success" if full_output else "tail",
     )
+
+
+def build_project(
+    repo_arg: str | None,
+    *,
+    paths: list[str] | None = None,
+    task: str | None = None,
+    timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
+    list_timeout_seconds: int = HVIGOR_TASK_LIST_TIMEOUT_SECONDS,
+    refresh: bool = False,
+    progress=None,
+) -> dict:
+    started_at = time.monotonic()
+    paths = paths or []
+    emit_build_progress(progress, "detect", "resolving Harmony build environment")
+    result = resolve_verification_detection(repo_arg, refresh=refresh)
+    recommendations = recommend_tasks_for_paths(repo_arg, paths) if paths else None
+    task_list_outcome = None
+    public_tasks: list[str] = []
+    selected_task = task
+    selection_reason = "explicit --task"
+    refreshed_after_failure = False
+
+    if not selected_task:
+        remaining = remaining_timeout_seconds(started_at, timeout_seconds)
+        if remaining <= 0:
+            verification = build_deadline_failure(started_at, timeout_seconds, "list-tasks", "tasks")
+            return compact_build_result_for_agent({
+                "detection": result,
+                "paths": paths,
+                "task_list": None,
+                "public_tasks": [],
+                "selected_task": None,
+                "selection_reason": "build flow timed out before listing public tasks",
+                "recommendations": recommendations,
+                "verification": verification,
+                "refreshed_after_failure": refreshed_after_failure,
+                "timeout_seconds": timeout_seconds,
+                "list_timeout_seconds": list_timeout_seconds,
+                "duration_seconds": verification.get("duration_seconds"),
+            })
+        task_list_timeout = min(list_timeout_seconds, remaining)
+        if result.get("ready"):
+            emit_build_progress(progress, "list-tasks", f"running `hvigor tasks` with timeout {task_list_timeout}s")
+        else:
+            emit_build_progress(progress, "list-tasks", "environment is not ready; skipping `hvigor tasks`")
+        task_list_outcome = annotate_hvigor_outcome(
+            verify_task(result, "tasks", task_list_timeout, full_output=True),
+            phase="list-tasks",
+            task="tasks",
+        )
+        if (
+            result.get("cache", {}).get("source") == "cache"
+            and not task_list_outcome["success"]
+            and looks_like_environment_failure(task_list_outcome["output"])
+        ):
+            emit_build_progress(progress, "detect", "refreshing environment baseline after cached task listing failed")
+            result = resolve_verification_detection(repo_arg, refresh=True)
+            remaining = remaining_timeout_seconds(started_at, timeout_seconds)
+            if remaining <= 0:
+                verification = build_deadline_failure(started_at, timeout_seconds, "list-tasks", "tasks")
+                return compact_build_result_for_agent({
+                    "detection": result,
+                    "paths": paths,
+                    "task_list": task_list_outcome,
+                    "public_tasks": [],
+                    "selected_task": None,
+                    "selection_reason": "build flow timed out before retrying public task listing",
+                    "recommendations": recommendations,
+                    "verification": verification,
+                    "refreshed_after_failure": True,
+                    "timeout_seconds": timeout_seconds,
+                    "list_timeout_seconds": list_timeout_seconds,
+                    "duration_seconds": verification.get("duration_seconds"),
+                })
+            task_list_timeout = min(list_timeout_seconds, remaining)
+            if result.get("ready"):
+                emit_build_progress(progress, "list-tasks", f"retrying `hvigor tasks` with timeout {task_list_timeout}s")
+            else:
+                emit_build_progress(progress, "list-tasks", "environment is not ready after refresh; skipping `hvigor tasks`")
+            task_list_outcome = annotate_hvigor_outcome(
+                verify_task(result, "tasks", task_list_timeout, full_output=True),
+                phase="list-tasks",
+                task="tasks",
+            )
+            refreshed_after_failure = True
+
+        if not task_list_outcome["success"]:
+            verification = build_selection_failure(
+                "Unable to choose a build task because `hvigor tasks` failed.\n"
+                + (task_list_outcome.get("output") or ""),
+                exit_code=task_list_outcome.get("exit_code", 1),
+                timed_out=task_list_outcome.get("timed_out", False),
+                duration_seconds=task_list_outcome.get("duration_seconds"),
+                phase="list-tasks",
+                task="tasks",
+            )
+            return compact_build_result_for_agent({
+                "detection": result,
+                "paths": paths,
+                "task_list": task_list_outcome,
+                "public_tasks": [],
+                "selected_task": None,
+                "selection_reason": "hvigor tasks failed; cannot choose a build task",
+                "recommendations": recommendations,
+                "verification": verification,
+                "refreshed_after_failure": refreshed_after_failure,
+                "timeout_seconds": timeout_seconds,
+                "list_timeout_seconds": list_timeout_seconds,
+                "duration_seconds": round(time.monotonic() - started_at, 3),
+            })
+
+        public_tasks = extract_public_tasks(task_list_outcome.get("output") or "")
+        selected_task, selection_reason = select_build_task(public_tasks, recommendations)
+        if not selected_task:
+            verification = build_selection_failure(
+                "Unable to choose a public build task automatically. "
+                "Pass --task with a public hvigor task from list-tasks.",
+                phase="select-task",
+            )
+            return compact_build_result_for_agent({
+                "detection": result,
+                "paths": paths,
+                "task_list": task_list_outcome,
+                "public_tasks": public_tasks,
+                "selected_task": None,
+                "selection_reason": selection_reason,
+                "recommendations": recommendations,
+                "verification": verification,
+                "refreshed_after_failure": refreshed_after_failure,
+                "timeout_seconds": timeout_seconds,
+                "list_timeout_seconds": list_timeout_seconds,
+                "duration_seconds": round(time.monotonic() - started_at, 3),
+            })
+
+    remaining = remaining_timeout_seconds(started_at, timeout_seconds)
+    if remaining <= 0:
+        outcome = build_deadline_failure(started_at, timeout_seconds, "build", selected_task)
+        return compact_build_result_for_agent({
+            "detection": result,
+            "paths": paths,
+            "task_list": task_list_outcome,
+            "public_tasks": public_tasks,
+            "selected_task": selected_task,
+            "selection_reason": selection_reason,
+            "recommendations": recommendations,
+            "verification": outcome,
+            "refreshed_after_failure": refreshed_after_failure,
+            "timeout_seconds": timeout_seconds,
+            "list_timeout_seconds": list_timeout_seconds,
+            "duration_seconds": outcome.get("duration_seconds"),
+        })
+    if result.get("ready"):
+        emit_build_progress(progress, "build", f"running `{selected_task}` with timeout {remaining}s")
+    else:
+        emit_build_progress(progress, "build", f"environment is not ready; skipping `{selected_task}`")
+    outcome = annotate_hvigor_outcome(
+        verify_task(result, selected_task, remaining),
+        phase="build",
+        task=selected_task,
+    )
+    if (
+        result.get("cache", {}).get("source") == "cache"
+        and not outcome["success"]
+        and looks_like_environment_failure(outcome["output"])
+    ):
+        emit_build_progress(progress, "detect", "refreshing environment baseline after cached build failed")
+        result = resolve_verification_detection(repo_arg, refresh=True)
+        remaining = remaining_timeout_seconds(started_at, timeout_seconds)
+        if remaining <= 0:
+            outcome = build_deadline_failure(started_at, timeout_seconds, "build", selected_task)
+            return compact_build_result_for_agent({
+                "detection": result,
+                "paths": paths,
+                "task_list": task_list_outcome,
+                "public_tasks": public_tasks,
+                "selected_task": selected_task,
+                "selection_reason": selection_reason,
+                "recommendations": recommendations,
+                "verification": outcome,
+                "refreshed_after_failure": True,
+                "timeout_seconds": timeout_seconds,
+                "list_timeout_seconds": list_timeout_seconds,
+                "duration_seconds": outcome.get("duration_seconds"),
+            })
+        if result.get("ready"):
+            emit_build_progress(progress, "build", f"retrying `{selected_task}` with timeout {remaining}s")
+        else:
+            emit_build_progress(progress, "build", f"environment is not ready after refresh; skipping `{selected_task}`")
+        outcome = annotate_hvigor_outcome(
+            verify_task(result, selected_task, remaining),
+            phase="build",
+            task=selected_task,
+        )
+        refreshed_after_failure = True
+    if (
+        outcome["success"]
+        and should_save_ready_baseline_for_task(selected_task)
+        and result.get("cache", {}).get("source") != "cache"
+    ):
+        result = dict(result)
+        result["ready"] = True
+        result["preflight"] = {**outcome, "task": selected_task}
+        result["cache"] = save_cached_detection(result)
+
+    return compact_build_result_for_agent({
+        "detection": result,
+        "paths": paths,
+        "task_list": task_list_outcome,
+        "public_tasks": public_tasks,
+        "selected_task": selected_task,
+        "selection_reason": selection_reason,
+        "recommendations": recommendations,
+        "verification": outcome,
+        "refreshed_after_failure": refreshed_after_failure,
+        "timeout_seconds": timeout_seconds,
+        "list_timeout_seconds": list_timeout_seconds,
+        "duration_seconds": round(time.monotonic() - started_at, 3),
+    })
+
+
+def print_build_result(result: dict) -> None:
+    detection = result.get("detection") or {}
+    repo = detection.get("repo") or {}
+    resolved = detection.get("resolved") or {}
+    verification = result.get("verification") or {}
+    success = verification.get("success")
+    print("BUILD SUCCESS" if success else "BUILD FAILED")
+    print(f"Repo: {repo.get('local_path') or repo.get('input') or 'UNKNOWN'}")
+    print(f"Task: {result.get('selected_task') or 'NOT SELECTED'}")
+    if resolved.get("sdk_home"):
+        print(f"SDK: {resolved['sdk_home']}")
+    if verification.get("phase"):
+        print(f"Phase: {verification['phase']}")
+    print(f"Exit code: {verification.get('exit_code')}")
+    duration = result.get("duration_seconds")
+    if duration is None:
+        duration = verification.get("duration_seconds")
+    if duration is not None:
+        print(f"Duration: {duration}s")
+    if verification.get("timed_out"):
+        print("Timed out: yes")
+    blockers = detection.get("blockers") or []
+    if not detection.get("ready", True) and blockers:
+        print(f"Detection blockers: {', '.join(blockers)}")
+        blocker_details = detection.get("blocker_details") or {}
+        for blocker in blockers:
+            detail = blocker_details.get(blocker)
+            if detail:
+                print(f"  - {detail}")
+    output = verification.get("output")
+    if output:
+        print("Output:")
+        print(summarize_output(output, max_lines=24))
 
 
 def looks_like_environment_failure(output: str) -> bool:
@@ -1235,6 +1823,13 @@ def positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be a positive integer")
     return parsed
+
+
+def hvigor_task_arg(value: str) -> str:
+    task_error = validate_hvigor_task(value)
+    if task_error:
+        raise argparse.ArgumentTypeError(task_error)
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1259,6 +1854,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="skip_preflight",
         help=argparse.SUPPRESS,
+    )
+    detect_parser.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HVIGOR_PREFLIGHT_TIMEOUT_SECONDS,
+        help=f"Hard timeout for the detect preflight `hvigor tasks`. Defaults to {HVIGOR_PREFLIGHT_TIMEOUT_SECONDS}.",
     )
     detect_parser.add_argument(
         "--doctor",
@@ -1290,8 +1891,8 @@ def build_parser() -> argparse.ArgumentParser:
     list_tasks_parser.add_argument(
         "--timeout-seconds",
         type=positive_int,
-        default=HVIGOR_TASK_TIMEOUT_SECONDS,
-        help=f"Hard timeout for the hvigor process wrapper. Defaults to {HVIGOR_TASK_TIMEOUT_SECONDS}.",
+        default=HVIGOR_TASK_LIST_TIMEOUT_SECONDS,
+        help=f"Hard timeout for the hvigor process wrapper. Defaults to {HVIGOR_TASK_LIST_TIMEOUT_SECONDS}.",
     )
     list_tasks_parser.add_argument("--json", action="store_true", help="Print detection result and tasks outcome as JSON.")
     list_tasks_parser.add_argument(
@@ -1302,7 +1903,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = subparsers.add_parser("verify", help="Run a public hvigor task with the detected macOS environment.")
     verify_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
-    verify_parser.add_argument("--task", default="tasks", help="Public hvigor task to run. Defaults to tasks.")
+    verify_parser.add_argument("--task", required=True, type=hvigor_task_arg, help="Required public hvigor task to run.")
     verify_parser.add_argument(
         "--timeout-seconds",
         type=positive_int,
@@ -1314,6 +1915,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--refresh",
         action="store_true",
         help="Ignore cached ready baselines and rerun detection before verification.",
+    )
+
+    build_parser_cmd = subparsers.add_parser("build", help="Automatically choose and run a public hvigor build task.")
+    build_parser_cmd.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    build_parser_cmd.add_argument(
+        "--task",
+        type=hvigor_task_arg,
+        help="Explicit public hvigor task to run. Overrides automatic selection.",
+    )
+    build_parser_cmd.add_argument("--paths", nargs="*", default=[], help="Changed paths used to prefer a smaller module build task.")
+    build_parser_cmd.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HVIGOR_TASK_TIMEOUT_SECONDS,
+        help=f"Total hvigor wait budget for the build flow. Defaults to {HVIGOR_TASK_TIMEOUT_SECONDS}.",
+    )
+    build_parser_cmd.add_argument(
+        "--list-timeout-seconds",
+        type=positive_int,
+        default=HVIGOR_TASK_LIST_TIMEOUT_SECONDS,
+        help=f"Hard timeout for automatic `hvigor tasks` discovery. Defaults to {HVIGOR_TASK_LIST_TIMEOUT_SECONDS}.",
+    )
+    build_parser_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    build_parser_cmd.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ignore cached ready baselines and rerun detection before building.",
     )
 
     env_parser = subparsers.add_parser("print-env", help="Print a zsh/bash environment bootstrap snippet.")
@@ -1333,11 +1961,16 @@ def main() -> int:
     try:
         if args.command == "detect":
             preflight = not args.skip_preflight
+            progress = None
+            if not args.json:
+                progress = lambda message: print(message, file=sys.stderr, flush=True)
             result = resolve_detection(
                 args.repo,
                 preflight=preflight,
                 refresh=args.refresh,
                 allow_cache=preflight,
+                timeout_seconds=args.timeout_seconds,
+                progress=progress,
             )
             doctor_report = build_doctor_report_from_detection(result) if args.doctor else None
             task_recommendations = None
@@ -1382,7 +2015,12 @@ def main() -> int:
                 args.repo,
                 refresh=args.refresh,
             )
-            outcome = verify_task(result, "tasks", args.timeout_seconds)
+            if not args.json:
+                if result["ready"]:
+                    print(f"[harmony-build] list-tasks: running `hvigor tasks` with timeout {args.timeout_seconds}s", file=sys.stderr, flush=True)
+                else:
+                    print("[harmony-build] list-tasks: environment is not ready; skipping `hvigor tasks`", file=sys.stderr, flush=True)
+            outcome = verify_task(result, "tasks", args.timeout_seconds, full_output=True)
             if args.json:
                 print(
                     json.dumps(
@@ -1407,6 +2045,11 @@ def main() -> int:
                 args.repo,
                 refresh=args.refresh,
             )
+            if not args.json:
+                if result["ready"]:
+                    print(f"[harmony-build] verify: running `{args.task}` with timeout {args.timeout_seconds}s", file=sys.stderr, flush=True)
+                else:
+                    print(f"[harmony-build] verify: environment is not ready; skipping `{args.task}`", file=sys.stderr, flush=True)
             outcome = verify_task(result, args.task, args.timeout_seconds)
             refreshed_after_failure = False
             if (
@@ -1418,9 +2061,18 @@ def main() -> int:
                     args.repo,
                     refresh=True,
                 )
+                if not args.json:
+                    if result["ready"]:
+                        print(f"[harmony-build] verify: retrying `{args.task}` after refreshing environment baseline", file=sys.stderr, flush=True)
+                    else:
+                        print(f"[harmony-build] verify: environment is not ready after refresh; skipping `{args.task}`", file=sys.stderr, flush=True)
                 outcome = verify_task(result, args.task, args.timeout_seconds)
                 refreshed_after_failure = True
-            if outcome["success"] and result.get("cache", {}).get("source") != "cache":
+            if (
+                outcome["success"]
+                and should_save_ready_baseline_for_task(args.task)
+                and result.get("cache", {}).get("source") != "cache"
+            ):
                 result = dict(result)
                 result["ready"] = True
                 result["preflight"] = {**outcome, "task": args.task}
@@ -1446,6 +2098,25 @@ def main() -> int:
                 if outcome["output"]:
                     print(outcome["output"])
             return outcome["exit_code"]
+
+        if args.command == "build":
+            progress = None
+            if not args.json:
+                progress = lambda message: print(message, file=sys.stderr, flush=True)
+            result = build_project(
+                args.repo,
+                paths=args.paths,
+                task=args.task,
+                timeout_seconds=args.timeout_seconds,
+                list_timeout_seconds=args.list_timeout_seconds,
+                refresh=args.refresh,
+                progress=progress,
+            )
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print_build_result(result)
+            return result["verification"]["exit_code"]
 
         if args.command == "print-env":
             result = resolve_detection(

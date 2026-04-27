@@ -72,16 +72,44 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 - `<skill_root>/run.py detect`
   - 探测运行宿主、仓库路径、Harmony 项目标记、Node、Java、Harmony SDK、DevEco Studio、`hvigor`、`ohpm` 和 `hdc`。
+  - 会读取 `build-profile.json5` 里的 `runtimeOS`；`HarmonyOS` 项目优先选择包含 `hms` 与 `openharmony` 组件的 DevEco SDK 根目录，避免把 OpenHarmony API 版本目录误判为可用 HarmonyOS SDK。
   - 默认运行 `hvigor tasks` 做 preflight；ready 时保存按仓库隔离的缓存基线。
   - `--refresh` 用于忽略缓存并重跑完整探测。
   - `--skip-preflight` 用于跳过 preflight，只做静态探测。
+  - `--timeout-seconds <seconds>` 控制 preflight 的 `hvigor tasks` 超时，默认 120 秒；非 JSON 模式会在等待 hvigor 前向 stderr 输出 preflight 进度。
+  - `--doctor` 可在同次探测后追加环境诊断；`--recommend-task --paths <paths...>` 可在探测后给出任务候选。
+
+- `<skill_root>/run.py doctor`
+  - 收集 Node、Java、SDK、DevEco Studio、`ohpm`、`hdc` 等诊断细节，不运行 hvigor。
+  - 环境不 ready 时仍返回诊断结果，适合解释阻塞原因。
+
+- `<skill_root>/run.py recommend-task`
+  - 基于改动路径推荐最小公开 hvigor 任务模板。
+  - 无法稳定映射时要求先列出公开任务，不伪造内部 `.hvigor` task key。
+
+- `<skill_root>/run.py list-tasks`
+  - 运行公开 `hvigor tasks` 列表流程，仅在需要查看任务或排查环境漂移时使用。
+  - 成功时读取完整 tasks 输出，避免只看到日志尾部。
+  - 默认硬超时为 120 秒，非 JSON 模式会在等待 hvigor 前向 stderr 输出进度。
+
+- `<skill_root>/run.py build`
+  - 面向 agent 的高层构建入口：自动探测环境、列出公开 tasks、选择构建任务并执行。
+  - 默认优先选路径推荐命中的公开模块任务；没有路径或模块任务不可用时，退到公开项目级构建任务。
+  - 自动列任务阶段会读取完整 tasks 输出用于解析公开任务；最终普通输出和 JSON 输出仍保持紧凑，成功时不回传 tasks 日志。
+  - 非 JSON 模式会先向 stderr 输出 `detect` / `list-tasks` / `build` 阶段进度，避免 agent 长时间无输出等待。
+  - 普通输出只报告 `BUILD SUCCESS` / `BUILD FAILED`、实际任务、SDK、阶段、退出码和耗时；成功时不回传 hvigor 日志，失败时才回传错误尾部。
+  - 可用 `--paths <paths...>` 帮助选择更小的构建任务；可用 `--task <public task>` 显式覆盖自动选择。
+  - `--timeout-seconds <seconds>` 是整条 build flow 的 hvigor 等待预算，默认 900 秒；自动列任务阶段另有 `--list-timeout-seconds <seconds>`，默认 120 秒。超时后进程清理会有短暂兜底等待。
+  - JSON 输出会保留 `verification.phase`、`verification.task`、`verification.timed_out`、`timeout_seconds` 和 `list_timeout_seconds`；成功时清空 hvigor 输出字段，失败时保留错误尾部。
 
 - `<skill_root>/run.py verify`
   - 默认优先复用缓存基线；缺失、失效或显式 `--refresh` 时，只做静态探测，然后直接运行目标任务。
-  - 目标任务成功后会把该仓库写入 ready baseline，后续命令可复用。
+  - 必须显式传 `--task <public task>`；未传时返回用法错误，不默认运行 `tasks`。
+  - 非 `tasks` 目标任务成功后会把该仓库写入 ready baseline，后续命令可复用。
   - 注入 `DEVECO_SDK_HOME`，并在缺省时同步 `HOS_SDK_HOME` / `OHOS_SDK_HOME`。
   - 如已解析出 `NODE_HOME` / `JAVA_HOME`，会注入到 hvigor 子进程。
   - hvigor 输出会重定向到临时文件，进程退出后只读取尾部摘要，避免长日志拖慢包装层。
+  - 非 JSON 模式会在等待 hvigor 前向 stderr 输出进度。
   - 默认硬超时为 900 秒，可用 `--timeout-seconds <seconds>` 覆盖。
 
 - `<skill_root>/run.py print-env`
@@ -92,7 +120,8 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 - 只有在需要给出最终构建结论时，才要求使用 `verify`。
 - 同仓库已有 ready baseline 时，可以把环境判定建立在该基线之上；不要机械地重复跑 `detect`。
-- 需要构建验证时，直接运行目标编译任务；不要把 `verify --task tasks` 作为默认前置步骤。
+- 需要构建验证但调用方不确定 task 时，优先用 `build`；只有已经明确 public task 时，才直接用 `verify --task <task>`。
+- 不要把 `verify --task tasks` 作为默认前置步骤；显式运行它只用于任务列表或环境排查，不写 ready baseline；需要任务选择时用 `build` 或 `list-tasks`。
 - 不要把 `assembleApp` 当成默认验证命令；除非本次任务确实需要 App 级产物结论。
 - 如果没有找到可工作的 SDK、Node 或 hvigor wrapper，报告环境阻塞，不要猜测代码问题。
 - 如果只做了 `--skip-preflight` 静态探测，不要把结果说成“已通过 hvigor 验证”。

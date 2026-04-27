@@ -14,6 +14,7 @@
 
 用法：
     <python_cmd> run.py reinit --hub-root /path/to/hub --docset harmonyos
+    <python_cmd> run.py reinit /path/to/hub
     <python_cmd> run.py reinit --docset all
 """
 
@@ -23,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -92,6 +94,49 @@ VACUUM_FREE_PAGE_RATIO = 0.2
 
 class DocsetBuildError(RuntimeError):
     """docset 构建在预检查阶段无法继续。调用方决定是终止 CLI 还是跳过单个 docset。"""
+
+
+DOCSET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+MARKDOWN_URL_RE = re.compile(r"https?://[A-Za-z0-9][^\s<>\]\)\"'`]+")
+
+
+def safe_docset_id(docset: dict[str, Any]) -> str:
+    docset_id = str(docset.get("id") or "").strip()
+    if not DOCSET_ID_RE.fullmatch(docset_id):
+        raise DocsetBuildError(f"docset id 不安全: {docset_id!r}")
+    return docset_id
+
+
+def resolve_docset_root(hub_root: Path, docset: dict[str, Any]) -> Path:
+    raw_root = str(docset.get("root") or "").strip()
+    if not raw_root:
+        raise DocsetBuildError(f"docset root 为空: {safe_docset_id(docset)}")
+    root_path = Path(raw_root)
+    if root_path.is_absolute():
+        raise DocsetBuildError(f"docset root 必须位于 hub root 内且使用相对路径: {raw_root}")
+
+    hub_root_resolved = hub_root.resolve()
+    resolved = (hub_root_resolved / root_path).resolve()
+    try:
+        resolved.relative_to(hub_root_resolved)
+    except ValueError as exc:
+        raise DocsetBuildError(f"docset root 越过 hub root 边界: {raw_root}") from exc
+    return resolved
+
+
+def docset_index_path(hub_root: Path, docset: dict[str, Any]) -> Path:
+    return hub_root.resolve() / "index" / f"{safe_docset_id(docset)}.sqlite"
+
+
+def docset_warnings_path(hub_root: Path, docset: dict[str, Any]) -> Path:
+    return hub_root.resolve() / "index" / f"{safe_docset_id(docset)}.warnings.jsonl"
+
+
+def infer_source_url_from_markdown(body: str) -> str:
+    match = MARKDOWN_URL_RE.search(body)
+    if match is None:
+        return ""
+    return match.group(0).rstrip(".,;:")
 
 
 @dataclass(frozen=True)
@@ -320,12 +365,13 @@ def delete_chunks(conn: sqlite3.Connection, doc_id: int) -> None:
 
 def build_docset(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any], rebuild: bool) -> dict[str, Any]:
     cfg = merge_config(defaults, docset)
-    root = hub_root / docset["root"]
+    docset_id = safe_docset_id(docset)
+    root = resolve_docset_root(hub_root, docset)
     if not root.exists():
         raise DocsetBuildError(f"docset root 不存在: {root}")
 
-    db_path = hub_root / "index" / f"{docset['id']}.sqlite"
-    warn_path = hub_root / "index" / f"{docset['id']}.warnings.jsonl"
+    db_path = docset_index_path(hub_root, docset)
+    warn_path = docset_warnings_path(hub_root, docset)
 
     if rebuild and db_path.exists():
         db_path.unlink()
@@ -428,7 +474,11 @@ def build_docset(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any
 
         source_url = str(fm.get("source_url") or "").strip()
         if not source_url:
-            warn.add(rel, "missing_source_url", "")
+            source_url = infer_source_url_from_markdown(body)
+            if source_url:
+                warn.add(rel, "derived_source_url", source_url)
+            else:
+                warn.add(rel, "missing_source_url", "")
             stats["warnings"] += 1
 
         rel_path_obj = Path(rel)
@@ -502,7 +552,7 @@ def build_docset(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any
     )
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('docset_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (docset["id"],),
+        (docset_id,),
     )
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('build_signature', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -526,13 +576,16 @@ def build_docset(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("hub_root_pos", nargs="?", help="DocsHub 根目录；等同 --hub-root")
     ap.add_argument("--hub-root", default=None, help="DocsHub 根目录；未传时按 env/祖先目录自动发现")
-    ap.add_argument("--docset", required=True, help="docset id 或 all")
+    ap.add_argument("--docset", default="all", help="docset id 或 all；默认 all")
     ap.add_argument("--rebuild", action="store_true", help="丢弃旧索引重建")
     args = ap.parse_args()
 
     state = ensure_initialized("构建索引")
-    hub_root = resolve_query_hub_root(args.hub_root, str(state.get("hub_root") or ""))
+    if args.hub_root and args.hub_root_pos:
+        raise SystemExit("[error] hub root 只能通过位置参数或 --hub-root 指定一次")
+    hub_root = resolve_query_hub_root(args.hub_root or args.hub_root_pos, str(state.get("hub_root") or ""))
     cfg = load_docsets(hub_root)
     defaults = cfg.get("defaults", {})
     docsets = cfg.get("docsets", [])

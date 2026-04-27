@@ -26,6 +26,22 @@
 
 每个 Skill 的 `SKILL.md` 必须独立写清运行约定：仓库源码布局不代表运行时安装路径，`<skill_root>` 只能由本次实际打开的入口文件推导；查找 `run.py`、`scripts/`、`references/`、模板或其他附件前，必须先基于该根目录显式确认目标存在；路径不一致或附件缺失时，报告问题并回退手工流程，不根据同名目录、`.system`、`builtin`、`installed` 等目录习惯猜测替代路径。
 
+## 验证入口
+
+本仓库的主验证入口是聚合测试：
+
+```text
+<python_cmd> -m unittest skills.test_all_skills
+```
+
+也可使用显式发现范围：
+
+```text
+<python_cmd> -m unittest discover -s skills -p 'test_*.py'
+```
+
+不要把仓库根目录下的 `<python_cmd> -m unittest discover` 当成主验证命令；它在当前布局下不会发现 `skills/*/tests` 内的用例。
+
 ## 运行态目录约定
 
 带本地缓存、初始化状态或运行时依赖的 Skill，统一使用用户级外置目录：

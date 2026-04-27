@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
+import importlib.util
 import json
 import re
 from pathlib import Path, PureWindowsPath
@@ -101,6 +104,29 @@ REACT_HIGH_RISK_SEGMENTS = {
     "server",
 }
 
+IGNORED_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".idea",
+    ".vscode",
+    ".gradle",
+    ".hvigor",
+    ".venv",
+    "venv",
+    "node_modules",
+    "oh_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    "__pycache__",
+    "target",
+    "out",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a structured development workflow brief.")
@@ -113,6 +139,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--security-sensitive", action="store_true", help="Set when auth, permissions, or secrets are involved.")
     parser.add_argument("--performance-sensitive", action="store_true", help="Set when critical-path performance may change.")
     parser.add_argument("--bugfix", action="store_true", help="Set when the work starts from a bug or failing verification.")
+    parser.add_argument(
+        "--task-intake",
+        action="store_true",
+        help="Return a high-level task execution package combining project facts and change plan; does not run validation.",
+    )
     parser.add_argument(
         "--format",
         choices=("markdown", "json"),
@@ -136,13 +167,48 @@ def normalize_relpath(repo: Path, raw_path: str) -> tuple[str, bool]:
         return normalize_path_for_output(raw_path), True
     if raw_path.startswith("/") and not raw_path.startswith("//") and not path.is_absolute():
         return normalize_path_for_output(raw_path), True
-    resolved = path.resolve() if path.is_absolute() else (repo / path).resolve()
+    canonical_repo = repo.expanduser().resolve()
+    if path.is_absolute():
+        resolved = path.expanduser().resolve()
+        try:
+            return normalize_path_for_output(str(resolved.relative_to(canonical_repo))), False
+        except ValueError:
+            return normalize_path_for_output(raw_path), True
+
+    resolved = (canonical_repo / path).resolve()
     try:
-        return normalize_path_for_output(str(resolved.relative_to(repo))), False
+        return normalize_path_for_output(str(resolved.relative_to(canonical_repo))), False
     except ValueError:
-        if path.is_absolute():
-            return normalize_path_for_output(str(resolved)), True
-    return normalize_path_for_output(str(resolved)), True
+        return normalize_path_for_output(str(resolved)), True
+
+
+def iter_directory_files(repo: Path, directory: Path):
+    for path in directory.rglob("*"):
+        relative_parts = path.relative_to(repo).parts
+        if any(part in IGNORED_DIRS for part in relative_parts):
+            continue
+        if path.is_file():
+            yield normalize_path_for_output(str(path.relative_to(repo)))
+
+
+def expand_paths_for_analysis(repo: Path, paths: list[str], outside_repo_paths: list[str]) -> list[str]:
+    outside = set(outside_repo_paths)
+    expanded = []
+    seen = set()
+    for path_text in paths:
+        candidates = [path_text]
+        if path_text not in outside:
+            path = repo / path_text
+            if path.is_dir():
+                files = list(iter_directory_files(repo, path))
+                if files:
+                    candidates = files
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            expanded.append(candidate)
+    return expanded
 
 
 def infer_module_name(path_text: str) -> str:
@@ -477,14 +543,16 @@ def recommended_skill_chain(
 
 
 def build_plan(repo: Path, args: argparse.Namespace) -> dict:
+    repo = repo.expanduser().resolve()
     normalized_paths = [normalize_relpath(repo, raw_path) for raw_path in args.paths]
     paths = [item[0] for item in normalized_paths]
     outside_repo_paths = [path_text for path_text, outside_repo in normalized_paths if outside_repo]
+    analysis_paths = expand_paths_for_analysis(repo, paths, outside_repo_paths)
     path_categories = set()
-    for path_text in paths:
+    for path_text in analysis_paths:
         path_categories.update(classify_path(path_text))
-    modules = infer_modules(paths)
-    full_mode = needs_full_workflow(path_categories, modules, args, len(paths), outside_repo_paths)
+    modules = infer_modules(analysis_paths)
+    full_mode = needs_full_workflow(path_categories, modules, args, len(analysis_paths), outside_repo_paths)
     stages = ["research"]
     if full_mode:
         stages.append("design")
@@ -502,6 +570,132 @@ def build_plan(repo: Path, args: argparse.Namespace) -> dict:
         "recommended_skill_chain": recommended_skill_chain(path_categories, modules, args, full_mode, outside_repo_paths),
         "validation_expectations": validation_expectations(path_categories, args, outside_repo_paths),
         "review_focus": review_focus(path_categories, args, outside_repo_paths),
+    }
+
+
+def dedupe(items: list[str]) -> list[str]:
+    result = []
+    seen = set()
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def load_project_facts_module():
+    script_path = Path(__file__).resolve().parents[2] / "project-onboarding" / "scripts" / "project_facts.py"
+    if not script_path.exists():
+        return None, f"未找到 project_facts 辅助脚本：{script_path}"
+
+    spec = importlib.util.spec_from_file_location("structured_dev_project_facts", script_path)
+    if spec is None or spec.loader is None:
+        return None, f"无法加载 project_facts 辅助脚本：{script_path}"
+
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as error:  # pragma: no cover - defensive envelope for broken sibling helper
+        return None, f"project_facts 辅助脚本加载失败：{error}"
+    return module, None
+
+
+def collect_project_facts(repo: Path) -> tuple[dict | None, str | None]:
+    project_facts, load_error = load_project_facts_module()
+    if load_error:
+        return None, load_error
+    try:
+        return project_facts.collect_facts(repo), None
+    except Exception as error:  # pragma: no cover - defensive envelope for unexpected scan failures
+        return None, f"project_facts 扫描失败：{error}"
+
+
+def collect_validation_candidates(plan: dict, facts: dict | None) -> dict:
+    commands = []
+    seen_commands = set()
+
+    def add_command(command: str, reason: str, source: str, scope: str) -> None:
+        if command in seen_commands:
+            return
+        seen_commands.add(command)
+        commands.append(
+            {
+                "command": command,
+                "reason": reason,
+                "source": source,
+                "scope": scope,
+            }
+        )
+
+    if facts:
+        inferred = facts.get("inferred", {})
+        for item in inferred.get("validation_commands", []):
+            add_command(item["command"], item["reason"], "project_facts.root", ".")
+        for module in inferred.get("modules", []):
+            module_path = module.get("path", ".")
+            for item in module.get("validation_commands", []):
+                add_command(item["command"], item["reason"], "project_facts.module", module_path)
+
+    return {
+        "commands": commands,
+        "expectations": plan["validation_expectations"],
+        "not_executed": True,
+    }
+
+
+def task_risks(plan: dict, facts: dict | None, facts_error: str | None) -> list[str]:
+    risks = []
+    categories = set(plan["path_categories"])
+    if facts_error:
+        risks.append(f"项目事实扫描失败，执行前需手工补齐事实：{facts_error}")
+    if plan["outside_repo_paths"]:
+        risks.append("涉及仓库外路径，执行前需确认这些路径是否属于本次交付边界。")
+    if plan["mode"] == "full":
+        risks.append("已触发 full 工作流，说明变更范围、风险标记或模块数量需要更完整的设计、复查和验证。")
+    if {"dependencies", "config", "schema"} & categories:
+        risks.append("路径分类包含依赖、配置或模式变更，需关注工具链、默认值、兼容性和回滚边界。")
+    if HIGH_RISK_PATH_CATEGORIES & categories:
+        risks.append("命中高风险路径分类，需针对对应技术栈补充契约、资源接线或构建链路复查。")
+    if facts:
+        if facts.get("parse_errors"):
+            risks.append("项目配置存在解析异常，不能只依赖自动扫描结论。")
+        stacks = facts.get("inferred", {}).get("primary_stacks", [])
+        if len(stacks) > 1:
+            risks.append("仓库包含多种技术栈，执行前需确认本次任务实际落点和验证范围。")
+    return dedupe(risks)
+
+
+def task_needs_confirmation(plan: dict, facts: dict | None, facts_error: str | None) -> list[str]:
+    needs = []
+    if not plan["goal"]:
+        needs.append("任务目标未提供，需要在执行前明确预期结果。")
+    if not plan["paths"]:
+        needs.append("未提供涉及路径，需要先收敛影响面再开始实现。")
+    if plan["outside_repo_paths"]:
+        needs.append("仓库外路径是否纳入本次任务范围。")
+    if facts_error:
+        needs.append("项目事实扫描失败后的人工补充事实来源。")
+    if facts:
+        needs.extend(facts.get("needs_confirmation", []))
+    return dedupe(needs)
+
+
+def build_task_intake(repo: Path, args: argparse.Namespace) -> dict:
+    repo = repo.expanduser().resolve()
+    plan = build_plan(repo, args)
+    facts, facts_error = collect_project_facts(repo)
+    return {
+        "package_type": "task-intake",
+        "repo_path": str(repo),
+        "goal": args.goal,
+        "not_executed": ["implementation", "validation"],
+        "plan": plan,
+        "facts": facts,
+        "facts_error": facts_error,
+        "validation_candidates": collect_validation_candidates(plan, facts),
+        "risks": task_risks(plan, facts, facts_error),
+        "needs_confirmation": task_needs_confirmation(plan, facts, facts_error),
     }
 
 
@@ -525,11 +719,76 @@ def render_markdown(plan: dict) -> str:
     return "\n".join(lines)
 
 
+def render_task_intake_markdown(package: dict) -> str:
+    plan = package["plan"]
+    facts = package["facts"]
+    lines = [
+        f"仓库路径：{package['repo_path']}",
+        f"任务目标：{package['goal'] or '未提供'}",
+        "执行包类型：task-intake",
+        "执行状态：仅生成计划与候选验证，不执行实现或验证命令。",
+        "计划摘要：",
+        f"- 工作流模式：{plan['mode']}",
+        f"- 涉及路径：{', '.join(plan['paths']) or '未提供'}",
+        f"- 涉及模块：{', '.join(plan['modules']) or '未识别'}",
+        f"- 阶段：{' -> '.join(plan['stages'])}",
+        f"- 建议串联 Skill：{', '.join(plan['recommended_skill_chain']) or '无额外串联'}",
+        "项目事实：",
+    ]
+    if facts:
+        confirmed = facts["confirmed_facts"]
+        inferred = facts["inferred"]
+        module_paths = [module["path"] for module in inferred.get("modules", [])]
+        lines.extend(
+            [
+                f"- 项目摘要：{facts['summary'] or '未从入口文档提取到摘要'}",
+                f"- 文档入口：{', '.join(confirmed['docs']) or '未发现'}",
+                f"- 主技术栈：{', '.join(inferred['primary_stacks']) or '未识别'}",
+                f"- 入口候选：{', '.join(inferred['entry_points']) or '未识别'}",
+                f"- 模块候选：{', '.join(module_paths) or '未识别'}",
+            ]
+        )
+    else:
+        lines.append(f"- 未能扫描项目事实：{package['facts_error']}")
+
+    lines.append("验证候选命令（未执行）：")
+    commands = package["validation_candidates"]["commands"]
+    if commands:
+        for item in commands:
+            lines.append(f"- {item['command']}  # scope={item['scope']}; {item['reason']}")
+    else:
+        lines.append("- 未识别")
+    lines.append("验证要求：")
+    for item in package["validation_candidates"]["expectations"]:
+        lines.append(f"- {item}")
+    lines.append("风险：")
+    if package["risks"]:
+        for item in package["risks"]:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- 当前未识别到额外风险。")
+    lines.append("待确认：")
+    if package["needs_confirmation"]:
+        for item in package["needs_confirmation"]:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- 当前未识别到必须补问的阻塞项。")
+    return "\n".join(lines)
+
+
 def main() -> int:
     args = parse_args()
     repo = Path(args.repo).resolve()
     if not repo.exists():
         raise SystemExit(f"Repository path does not exist: {repo}")
+
+    if args.task_intake:
+        package = build_task_intake(repo, args)
+        if args.format == "json":
+            print(json.dumps(package, ensure_ascii=False, indent=2))
+        else:
+            print(render_task_intake_markdown(package))
+        return 1 if package["facts_error"] else 0
 
     plan = build_plan(repo, args)
     if args.format == "json":

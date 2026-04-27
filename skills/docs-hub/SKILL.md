@@ -1,6 +1,6 @@
 ---
 name: docs-hub
-description: Query and maintain an external local DocsHub markdown knowledge base. This is the default and primary retrieval path whenever you need to查本地文档、DocsHub、共享知识库、API/指南/FAQ/最佳实践/错误码/SDK 文档，or whenever you need documentation, API facts, guides, FAQ entries, best practices, error codes, SDK references, or other factual/reference material before answering. You must query the local DocsHub first and must not fall back to memory, web search, or other lookup methods unless the local hub is missing, cannot be resolved, returns no useful result after reasonable query refinement, or the user explicitly requires the latest online state. Also use when the user explicitly invokes $docs-hub for init, refresh, or reinit.
+description: Query and maintain an external local DocsHub markdown knowledge base. This is the default and primary retrieval path whenever you need to查本地文档、DocsHub、共享知识库、API/指南/FAQ/最佳实践/错误码/SDK 文档，or whenever you need documentation, API facts, guides, FAQ entries, best practices, error codes, SDK references, or other factual/reference material before answering. You must query the local DocsHub first and must not fall back to memory, web search, or other lookup methods unless the local hub is missing, cannot be resolved, returns no useful result after reasonable query refinement, or the user explicitly requires the latest online state. Also use when the user explicitly invokes $docs-hub for init, lookup, refresh, reinit, status, or doctor.
 ---
 
 # Doc Hub
@@ -30,10 +30,14 @@ Use this skill as the default retrieval gateway for documentation and factual/re
   If `hub-root` is explicitly provided, validate only that directory and fail if it is not a standard DocsHub root. Otherwise resolve from environment/current workspace. Then run the bundled init script, record that hub as the default working directory, refresh the local runtime dependency cache, and auto-build missing or stale indexes.
 - `$docs-hub <query>`
   Search the DocsHub and answer from the matched local files.
+- `$docs-hub lookup <query>`
+  Agent-oriented search. It returns JSON with `ok`, `partial`, `failed`, `results`, and `failed_docsets`.
 - `$docs-hub refresh <query>`
   Refresh the relevant local index first, then search.
-- `$docs-hub reinit [hub-root]`
-  Rebuild the target DocsHub indexes from scratch. Use this only when the user explicitly asks for a full rebuild or the index is broken.
+- `$docs-hub reinit [hub-root] [--docset <id>]`
+  Rebuild indexes from scratch. If `--docset` is omitted, the default target is `all`.
+- `$docs-hub status [--json]` / `$docs-hub doctor [--json]`
+  Check init state, resolved hub root, docsets, and index health without rebuilding indexes.
 
 ## When to use
 
@@ -41,6 +45,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - The target is a DocsHub-style repository with `docsets.json`, `docs/`, optional `index/`, and markdown content.
 - The user wants to refresh or rebuild a local docs index.
 - The user explicitly invokes `$docs-hub`.
+- The user wants to check DocsHub health or why lookup/search did not return expected local evidence.
 - You need to look up documentation, API facts, guides, FAQ entries, best practices, error codes, SDK references, or other factual material before answering, even if the user did not explicitly say “查本地文档”.
 - The query might plausibly be answered from the local DocsHub, even if other tools or your own memory could also answer it.
 - Default policy: if the local hub could reasonably contain the answer, search the local hub first and only then consider any other lookup route.
@@ -62,10 +67,13 @@ Use this skill as the default retrieval gateway for documentation and factual/re
    Then stop after reporting success/failure.
 4. Otherwise, for every documentation or factual/reference query, run the bundled search script first:
    - `<python_cmd> <skill_root>/run.py search --hub-root <hub_root> <keywords> --top 8`
+   For automation, prefer:
+   - `<python_cmd> <skill_root>/run.py lookup --hub-root <hub_root> <keywords> --top 8`
 5. Search first, then open the top 1-3 matched files via the returned `abs_path` and answer from evidence.
 6. Only if the local hub has no useful match after reasonable query refinement, or the user explicitly requires online-latest information, then fall back to other lookup methods.
 7. If the user explicitly asks for `refresh`, use `--rebuild-stale`.
-8. If the user explicitly asks for `reinit`, use `run.py reinit`.
+8. If the user explicitly asks for `reinit`, use `run.py reinit`; pass `--docset <id>` only when the rebuild should be limited.
+9. If search/lookup fails or returns an unexpected empty result, run `run.py status --json` before concluding the hub has no evidence.
 
 ## Initialization
 
@@ -87,6 +95,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - Use `--docset <id>` when the documentation family is obvious.
 - Use `--section` when the query is clearly in `FAQ` / `指南` / `参考` / `最佳实践`.
 - For short tokens such as `UI`, `IME`, `光标`, the search script already falls back to LIKE across `title/symbols/body`; you do not need a separate grep unless the index is missing.
+- JSON search/lookup output is always an object. Read `results` for hits and inspect `failed_docsets` before treating an empty `results` list as a real no-match.
 
 ## Refresh / Reinit
 
@@ -95,12 +104,20 @@ Use this skill as the default retrieval gateway for documentation and factual/re
   - `<python_cmd> <skill_root>/run.py refresh --hub-root <hub_root> <keywords> --top 8`
 - Use `reinit` only when the index is missing, corrupted, or the user explicitly asks for a docset-wide rebuild:
   - `<python_cmd> <skill_root>/run.py reinit --hub-root <hub_root> --docset <id>`
+  - `<python_cmd> <skill_root>/run.py reinit <hub_root>` rebuilds all docsets by default.
+
+## Status / Doctor
+
+- Use status/doctor for quick health checks only; these commands do not install dependencies, refresh indexes, or rebuild docsets.
+- JSON status output includes `initialized`, `hub_root`, `docsets`, `healthy_docsets`, and `failed_docsets`.
+- Treat non-empty `failed_docsets` as a setup/index problem, not as evidence that the documentation has no answer.
 
 ## Answering rules
 
 - Prefer local evidence over memory, and do not skip the local DocsHub lookup when it could plausibly answer the question.
 - Return the resolved file path and `source_url` when available.
 - If the local index, dependency cache, or document source is unavailable, report the failure explicitly; do not silently degrade to memory, empty results, or fabricated sources.
+- For plain-text search, any failed docset exits non-zero and reports the failed docset on stderr. For JSON search/lookup, inspect `ok`, `partial`, `failed`, and `failed_docsets`.
 - If the local snapshot has no answer, or the user explicitly asks for the latest online state, say the local hub may be stale and then consult the official source or another appropriate lookup method.
 
 ## References

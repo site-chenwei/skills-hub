@@ -38,6 +38,36 @@ class CodeReviewChecklistRunnerTests(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["changed_files"][0]["path"], "src/app.py")
 
+    def test_runner_dispatches_review_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "src").mkdir()
+            (repo / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER_PATH),
+                    "review-context",
+                    "--repo",
+                    str(repo),
+                    "--files",
+                    "src/app.py",
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["package_type"], "review-context")
+        self.assertFalse(payload["findings"]["generated"])
+        self.assertEqual(payload["scope"]["changed_files"][0]["path"], "src/app.py")
+
 
 if __name__ == "__main__":
     unittest.main()

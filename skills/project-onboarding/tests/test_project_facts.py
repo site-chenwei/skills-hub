@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import shlex
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -10,6 +12,16 @@ SPEC = importlib.util.spec_from_file_location("project_facts", SCRIPT_PATH)
 PROJECT_FACTS = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(PROJECT_FACTS)
+
+
+@contextmanager
+def mock_tomllib(value):
+    original = PROJECT_FACTS.tomllib
+    PROJECT_FACTS.tomllib = value
+    try:
+        yield
+    finally:
+        PROJECT_FACTS.tomllib = original
 
 
 def modules_by_path(facts: dict) -> dict:
@@ -84,6 +96,123 @@ class ProjectFactsTests(unittest.TestCase):
         self.assertTrue(any("pyproject.toml" in item for item in facts["parse_errors"]))
         self.assertTrue(any("解析失败" in item for item in facts["parse_errors"]))
         self.assertTrue(any("解析失败" in item for item in facts["needs_confirmation"]))
+
+    def test_collect_facts_uses_pyproject_for_python_and_tooling_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Pyproject Repo\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text(
+                "[project]\nname = 'demo'\n\n[tool.ruff]\nline-length = 100\n",
+                encoding="utf-8",
+            )
+
+            facts = PROJECT_FACTS.collect_facts(repo)
+
+        self.assertIn("python", facts["inferred"]["primary_stacks"])
+        commands = {item["command"] for item in facts["inferred"]["validation_commands"]}
+        self.assertIn("<python_cmd> -m pytest", commands)
+        self.assertIn("<python_cmd> -m ruff check .", commands)
+        modules = modules_by_path(facts)
+        self.assertIn(".", modules)
+        self.assertIn("python", modules["."]["stacks"])
+        self.assertIn("pyproject.toml", modules["."]["configs"])
+        self.assertEqual(facts["parse_errors"], [])
+
+    def test_simple_toml_fallback_accepts_common_multiline_dependencies_array(self) -> None:
+        with mock_tomllib(None):
+            parsed = PROJECT_FACTS.parse_simple_toml(
+                "\n".join(
+                    [
+                        "[project]",
+                        "name = 'demo'",
+                        "dependencies = [",
+                        "  'requests>=2.0,<3.0',",
+                        "  'click',",
+                        "]",
+                        "",
+                        "[tool.ruff]",
+                        "line-length = 100",
+                    ]
+                )
+            )
+
+        self.assertEqual(parsed["project"]["dependencies"], ["requests>=2.0,<3.0", "click"])
+        self.assertEqual(parsed["tool"]["ruff"]["line-length"], 100)
+
+    def test_load_pyproject_fallback_does_not_report_multiline_dependencies_as_parse_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Fallback TOML\n", encoding="utf-8")
+            (repo / "pyproject.toml").write_text(
+                "\n".join(
+                    [
+                        "[project]",
+                        "name = 'demo'",
+                        "dependencies = [",
+                        "  'requests>=2.0,<3.0',",
+                        "  'click',",
+                        "]",
+                        "",
+                        "[tool.ruff]",
+                        "line-length = 100",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with mock_tomllib(None):
+                facts = PROJECT_FACTS.collect_facts(repo)
+
+        self.assertEqual(facts["parse_errors"], [])
+        self.assertIn("python", facts["inferred"]["primary_stacks"])
+        commands = {item["command"] for item in facts["inferred"]["validation_commands"]}
+        self.assertIn("<python_cmd> -m pytest", commands)
+        self.assertIn("<python_cmd> -m ruff check .", commands)
+
+    def test_simple_toml_fallback_rejects_unsupported_inline_tables(self) -> None:
+        with self.assertRaises(ValueError):
+            PROJECT_FACTS.parse_simple_toml("[project]\nname = { text = 'demo' }\n")
+
+    def test_collect_facts_reports_skills_hub_modules_and_aggregate_unittest_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# skills-hub\n", encoding="utf-8")
+            skills_root = repo / "skills"
+            skills_root.mkdir()
+            (skills_root / "test_all_skills.py").write_text(
+                "from __future__ import annotations\n\nimport unittest\n",
+                encoding="utf-8",
+            )
+            for skill_name in ["alpha-skill", "beta-skill"]:
+                skill_root = skills_root / skill_name
+                (skill_root / "tests").mkdir(parents=True)
+                (skill_root / "SKILL.md").write_text(
+                    f"---\nname: {skill_name}\ndescription: Demo skill.\n---\n",
+                    encoding="utf-8",
+                )
+                (skill_root / "run.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+                (skill_root / "tests" / f"test_{skill_name.replace('-', '_')}.py").write_text(
+                    "import unittest\n\nclass DemoTests(unittest.TestCase):\n    pass\n",
+                    encoding="utf-8",
+                )
+
+            facts = PROJECT_FACTS.collect_facts(repo)
+
+        modules = modules_by_path(facts)
+        self.assertIn("skills/alpha-skill", modules)
+        self.assertIn("skills/beta-skill", modules)
+        for module_path in ["skills/alpha-skill", "skills/beta-skill"]:
+            module = modules[module_path]
+            self.assertIn("python", module["stacks"])
+            self.assertIn("SKILL.md", module["configs"])
+            self.assertIn("run.py", module["configs"])
+            commands = {item["command"] for item in module["validation_commands"]}
+            self.assertIn(f"cd {module_path} && <python_cmd> -m unittest discover -s tests", commands)
+            self.assertNotIn(f"cd {module_path} && <python_cmd> -m unittest discover", commands)
+
+        commands = [item["command"] for item in facts["inferred"]["validation_commands"]]
+        self.assertEqual(commands[0], "<python_cmd> -m unittest skills.test_all_skills")
+        self.assertNotIn("<python_cmd> -m unittest discover", commands)
 
     def test_collect_facts_infers_python_stack_and_unittest_command_from_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -259,6 +388,34 @@ class ProjectFactsTests(unittest.TestCase):
         self.assertIn("cd apps/web && pnpm run build", commands)
         root_commands = {item["command"] for item in facts["inferred"]["validation_commands"]}
         self.assertNotIn("cd apps/web && pnpm test", root_commands)
+
+    def test_module_validation_commands_shell_quote_paths_with_expansion_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            module_path = "apps/web $(whoami) $HOME `id`"
+            web = repo / module_path
+            (repo / "README.md").write_text("# Monorepo\n", encoding="utf-8")
+            (web / "src").mkdir(parents=True)
+            (web / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "web",
+                        "scripts": {
+                            "test": "vitest run",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (web / "src" / "App.tsx").write_text("export function App() { return null; }\n", encoding="utf-8")
+
+            facts = PROJECT_FACTS.collect_facts(repo)
+
+        module = modules_by_path(facts)[module_path]
+        commands = {item["command"] for item in module["validation_commands"]}
+        quoted_path = shlex.quote(module_path)
+        self.assertIn(f"cd {quoted_path} && npm test", commands)
+        self.assertNotIn(f'cd "{module_path}" && npm test', commands)
 
     def test_collect_facts_reports_nested_java_maven_and_gradle_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -38,6 +38,39 @@ class StructuredDevRunnerTests(unittest.TestCase):
         self.assertIn(payload["mode"], {"light", "full"})
         self.assertEqual(payload["repo_path"], str(repo.resolve()))
 
+    def test_runner_dispatches_task_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "README.md").write_text("# Intake Runner\n", encoding="utf-8")
+            (repo / "src").mkdir()
+            (repo / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER_PATH),
+                    "task-intake",
+                    "--repo",
+                    str(repo),
+                    "--goal",
+                    "准备执行包",
+                    "--paths",
+                    "src/app.py",
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["package_type"], "task-intake")
+        self.assertEqual(payload["not_executed"], ["implementation", "validation"])
+        self.assertEqual(payload["facts"]["summary"], "Intake Runner")
+
 
 if __name__ == "__main__":
     unittest.main()

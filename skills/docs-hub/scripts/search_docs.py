@@ -5,10 +5,13 @@
     <python_cmd> run.py search --hub-root /path/to/hub 输入法 --top 10
     <python_cmd> run.py search 光标 跟随 --match all --docset harmonyos --top 5
     <python_cmd> run.py search pdd.mall.info.get --docset pinduoduo
+    <python_cmd> run.py lookup 输入法 --docset harmonyos
+    <python_cmd> run.py status --json
     <python_cmd> run.py refresh 订单 --top 8
 
 排序权重：bm25(chunks, 10.0, 6.0, 1.0) — title:10 symbols:6 body:1
 默认过滤 is_nav=1 的导航页；--include-nav 可带出。
+JSON 查询输出固定为对象：ok/partial/failed/results/failed_docsets。
 """
 
 from __future__ import annotations
@@ -24,11 +27,25 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from _bootstrap import ensure_initialized, format_python_command, resolve_query_hub_root  # noqa: E402
 from _common import load_docsets  # noqa: E402
-from build_docset_index import DocsetBuildError, build_docset  # noqa: E402
+from _bootstrap import dependency_cache_problem, init_state_path, load_init_state, runtime_root  # noqa: E402
+from build_docset_index import (  # noqa: E402
+    DocsetBuildError,
+    build_docset,
+    compute_build_signature,
+    docset_index_path,
+    merge_config,
+    meta_value,
+    resolve_docset_root,
+    safe_docset_id,
+)
 
 
-_FTS_SPECIAL = re.compile(r'[()":*\-+\^]')
-_QUERY_SPLIT_RE = re.compile(r"[\s,，、;；]+")
+_FTS_SPECIAL = re.compile(r'[()":*+\^]')
+_QUERY_SPLIT_RE = re.compile(r"[\s,，、;；/|-]+")
+
+
+class UnsafeIndexedPathError(ValueError):
+    """索引中的 rel_path 无法安全映射回当前 doc_root。"""
 
 
 def fts_escape(token: str) -> str:
@@ -41,6 +58,27 @@ def fts_escape(token: str) -> str:
     if not cleaned:
         return ""
     return '"' + cleaned.replace('"', ' ') + '"'
+
+
+def like_escape(token: str) -> str:
+    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def resolve_indexed_abs_path(doc_root: Path, rel_path: str) -> Path:
+    rel_path = str(rel_path or "")
+    if not rel_path:
+        raise UnsafeIndexedPathError("rel_path 为空")
+    indexed_path = Path(rel_path)
+    if indexed_path.is_absolute():
+        raise UnsafeIndexedPathError(f"rel_path 不能是绝对路径: {rel_path}")
+
+    doc_root_resolved = doc_root.resolve()
+    abs_path = (doc_root_resolved / indexed_path).resolve()
+    try:
+        abs_path.relative_to(doc_root_resolved)
+    except ValueError as exc:
+        raise UnsafeIndexedPathError(f"rel_path 越过 doc_root 边界: {rel_path}") from exc
+    return abs_path
 
 
 def _is_short_token(token: str) -> bool:
@@ -80,11 +118,11 @@ def build_short_token_hit_union(
     selects: list[str] = []
     params: list[Any] = []
     for token_ord, token in enumerate(tokens):
-        pattern = f"%{token}%"
+        pattern = f"%{like_escape(token)}%"
         for column_expr, weight in weighted_columns:
             selects.append(
                 f"SELECT {chunk_rowid_expr} AS chunk_rowid, {token_ord} AS token_ord, {weight} AS weight "
-                f"{from_clause} WHERE {column_expr} LIKE ?"
+                f"{from_clause} WHERE {column_expr} LIKE ? ESCAPE '\\'"
             )
             params.append(pattern)
     return "\nUNION ALL\n".join(selects), params
@@ -278,22 +316,243 @@ def collect_fallback_rows(
     ], expanded_keywords
 
 
-def list_docsets(hub_root: Path) -> None:
+def make_docset_failure(
+    docset: dict[str, Any],
+    reason: str,
+    message: str,
+    *,
+    index_path: Path | None = None,
+    doc_root: Path | None = None,
+) -> dict[str, Any]:
+    failure = {
+        "id": str(docset.get("id") or ""),
+        "reason": reason,
+        "message": message,
+    }
+    if docset.get("root"):
+        failure["root"] = str(docset["root"])
+    if doc_root is not None:
+        failure["doc_root"] = doc_root.resolve().as_posix()
+    if index_path is not None:
+        failure["index_path"] = index_path.resolve().as_posix()
+    return failure
+
+
+def search_payload(
+    *,
+    hub_root: Path,
+    results: list[dict[str, Any]],
+    failed_docsets: list[dict[str, Any]],
+    searched_docsets: list[str],
+) -> dict[str, Any]:
+    partial = bool(failed_docsets) and bool(searched_docsets)
+    failed = bool(failed_docsets) and not searched_docsets
+    return {
+        "ok": not failed_docsets,
+        "partial": partial,
+        "failed": failed,
+        "hub_root": hub_root.resolve().as_posix(),
+        "searched_docsets": searched_docsets,
+        "results": results,
+        "failed_docsets": failed_docsets,
+    }
+
+
+def docset_index_status(hub_root: Path, docset: dict[str, Any], defaults: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_docset_id = str(docset.get("id") or "")
+    raw_root = str(docset.get("root") or "")
+    try:
+        docset_id = safe_docset_id(docset)
+        doc_root = resolve_docset_root(hub_root, docset)
+        db_path = docset_index_path(hub_root, docset)
+    except DocsetBuildError as exc:
+        item = {
+            "id": raw_docset_id,
+            "name": str(docset.get("name") or ""),
+            "root": raw_root,
+            "doc_root": None,
+            "root_exists": False,
+            "index_path": None,
+            "index_exists": False,
+            "status": "invalid-config",
+            "documents": None,
+            "chunks": None,
+            "built_at": None,
+            "build_signature_match": None,
+        }
+        return item, make_docset_failure(
+            docset,
+            "invalid_config",
+            str(exc),
+        )
+    item: dict[str, Any] = {
+        "id": docset_id,
+        "name": str(docset.get("name") or ""),
+        "root": raw_root,
+        "doc_root": doc_root.as_posix(),
+        "root_exists": doc_root.exists(),
+        "index_path": db_path.resolve().as_posix(),
+        "index_exists": db_path.exists(),
+        "status": "indexed",
+        "documents": None,
+        "chunks": None,
+        "built_at": None,
+        "build_signature_match": None,
+    }
+
+    if not item["root_exists"]:
+        item["status"] = "missing-root"
+        return item, make_docset_failure(
+            docset,
+            "missing_root",
+            f"docset root 不存在: {doc_root}",
+            index_path=db_path,
+            doc_root=doc_root,
+        )
+
+    if not db_path.exists():
+        item["status"] = "missing-index"
+        return item, make_docset_failure(
+            docset,
+            "missing_index",
+            f"索引缺失: {db_path}",
+            index_path=db_path,
+            doc_root=doc_root,
+        )
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(db_path)
+        item["documents"] = int(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        item["chunks"] = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        item["built_at"] = meta_value(conn, "built_at")
+        current_signature = meta_value(conn, "build_signature")
+        expected_signature = compute_build_signature(merge_config(defaults, docset))
+        item["build_signature_match"] = current_signature == expected_signature
+    except sqlite3.Error as exc:
+        item["status"] = "invalid-index"
+        return item, make_docset_failure(
+            docset,
+            "invalid_index",
+            f"索引不可读: {exc}",
+            index_path=db_path,
+            doc_root=doc_root,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if not item["build_signature_match"]:
+        item["status"] = "stale-index"
+        return item, make_docset_failure(
+            docset,
+            "stale_index",
+            "索引构建签名已过期，需要 refresh 或 reinit",
+            index_path=db_path,
+            doc_root=doc_root,
+        )
+
+    return item, None
+
+
+def collect_docset_status(hub_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cfg = load_docsets(hub_root)
-    for d in cfg.get("docsets", []):
-        db = hub_root / "index" / f"{d['id']}.sqlite"
-        status = "indexed" if db.exists() else "no-index"
+    defaults = cfg.get("defaults", {})
+    docsets: list[dict[str, Any]] = []
+    failed_docsets: list[dict[str, Any]] = []
+    for docset in cfg.get("docsets", []):
+        item, failure = docset_index_status(hub_root, docset, defaults)
+        docsets.append(item)
+        if failure is not None:
+            failed_docsets.append(failure)
+    return docsets, failed_docsets
+
+
+def list_docsets(hub_root: Path) -> None:
+    docsets, _failed_docsets = collect_docset_status(hub_root)
+    for d in docsets:
         extra = ""
-        if db.exists():
-            try:
-                conn = sqlite3.connect(db)
-                n_doc = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-                n_chunk = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-                extra = f" docs={n_doc} chunks={n_chunk}"
-                conn.close()
-            except sqlite3.Error as e:
-                extra = f" (read error: {e})"
-        print(f"- {d['id']:<12} {d['name']:<20} root={d['root']}  [{status}]{extra}")
+        if d.get("documents") is not None and d.get("chunks") is not None:
+            extra = f" docs={d['documents']} chunks={d['chunks']}"
+        print(f"- {d['id']:<12} {d['name']:<20} root={d['root']}  [{d['status']}]{extra}")
+
+
+def status_payload(explicit_hub_root: str | None) -> dict[str, Any]:
+    root = Path(__file__).parent.parent
+    state = load_init_state(root)
+    state_hub_root = str(state.get("hub_root") or "") if state else ""
+    dependency_problem = dependency_cache_problem(state, root) if state else "尚未初始化"
+    setup_errors: list[str] = []
+    if not state:
+        setup_errors.append("尚未初始化")
+    elif dependency_problem:
+        setup_errors.append(dependency_problem)
+
+    hub_root: Path | None = None
+    docsets: list[dict[str, Any]] = []
+    failed_docsets: list[dict[str, Any]] = []
+    hub_root_error: str | None = None
+    try:
+        hub_root = resolve_query_hub_root(explicit_hub_root, state_hub_root)
+    except SystemExit as exc:
+        hub_root_error = str(exc)
+        setup_errors.append(hub_root_error)
+
+    if hub_root is not None:
+        try:
+            docsets, failed_docsets = collect_docset_status(hub_root)
+        except Exception as exc:  # noqa: BLE001
+            hub_root_error = f"读取 docsets 状态失败: {exc}"
+            setup_errors.append(hub_root_error)
+
+    healthy_docsets = [docset["id"] for docset in docsets if docset.get("status") == "indexed"]
+    ok = not setup_errors and not failed_docsets
+    partial = not setup_errors and bool(failed_docsets) and bool(healthy_docsets)
+    failed = not ok and not partial
+    return {
+        "ok": ok,
+        "partial": partial,
+        "failed": failed,
+        "initialized": bool(state),
+        "state_path": init_state_path(root).resolve().as_posix(),
+        "runtime_root": runtime_root(root).resolve().as_posix(),
+        "dependency_problem": dependency_problem,
+        "hub_root": hub_root.resolve().as_posix() if hub_root is not None else None,
+        "hub_root_error": hub_root_error,
+        "setup_errors": setup_errors,
+        "healthy_docsets": healthy_docsets,
+        "docsets": docsets,
+        "results": [],
+        "failed_docsets": failed_docsets,
+    }
+
+
+def print_status(payload: dict[str, Any]) -> None:
+    print("DocsHub status")
+    print(f"- initialized: {'yes' if payload['initialized'] else 'no'}")
+    print(f"- state: {payload['state_path']}")
+    print(f"- runtime: {payload['runtime_root']}")
+    print(f"- hub_root: {payload['hub_root'] or '(unresolved)'}")
+    dependency_problem = payload.get("dependency_problem")
+    print(f"- dependency_cache: {'ok' if not dependency_problem else dependency_problem}")
+    if payload.get("hub_root_error"):
+        print(f"- hub_root_error: {payload['hub_root_error']}")
+    print("- docsets:")
+    if not payload.get("docsets"):
+        print("  (none)")
+    for docset in payload.get("docsets", []):
+        extra = ""
+        if docset.get("documents") is not None and docset.get("chunks") is not None:
+            extra = f" docs={docset['documents']} chunks={docset['chunks']}"
+        print(f"  - {docset['id']:<12} [{docset['status']}] root={docset['root']}{extra}")
+
+
+def print_failed_docsets(failed_docsets: list[dict[str, Any]]) -> None:
+    for failure in failed_docsets:
+        print(
+            f"[error] failed docset={failure['id']} reason={failure['reason']}: {failure['message']}",
+            file=sys.stderr,
+        )
 
 
 def ensure_index_ready(
@@ -301,35 +560,74 @@ def ensure_index_ready(
     docset: dict[str, Any],
     defaults: dict[str, Any],
     rebuild_stale: bool,
-) -> Path | None:
-    """返回可用的 db 路径；不可用返回 None。rebuild_stale=True 时允许触发 build。"""
-    docset_id = docset["id"]
-    db = hub_root / "index" / f"{docset_id}.sqlite"
-    if db.exists() and not rebuild_stale:
-        return db
-    if not db.exists() and not rebuild_stale:
-        print(
-            f"[error] docset '{docset_id}' 索引缺失: {db}\n"
-            f"  可手动运行: {format_python_command(Path(__file__).parent.parent / 'run.py', 'reinit', '--hub-root', hub_root, '--docset', docset_id)}",
-            file=sys.stderr,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """返回可用 db 路径和失败信息。rebuild_stale=True 时允许触发 build。"""
+    try:
+        docset_id = safe_docset_id(docset)
+        db = docset_index_path(hub_root, docset)
+        doc_root = resolve_docset_root(hub_root, docset)
+    except DocsetBuildError as exc:
+        return None, make_docset_failure(
+            docset,
+            "invalid_config",
+            str(exc),
         )
-        return None
+    if not doc_root.exists():
+        return None, make_docset_failure(
+            docset,
+            "missing_root",
+            f"docset root 不存在: {doc_root}",
+            index_path=db,
+            doc_root=doc_root,
+        )
+    if db.exists() and not rebuild_stale:
+        _status, failure = docset_index_status(hub_root, docset, defaults)
+        if failure is not None:
+            return None, failure
+        return db, None
+    if not db.exists() and not rebuild_stale:
+        message = (
+            f"索引缺失: {db}; "
+            f"可手动运行: {format_python_command(Path(__file__).parent.parent / 'run.py', 'reinit', '--hub-root', hub_root, '--docset', docset_id)}"
+        )
+        return None, make_docset_failure(
+            docset,
+            "missing_index",
+            message,
+            index_path=db,
+            doc_root=doc_root,
+        )
     # refresh 模式：直接调用 build_docset 函数，免去起子进程 + 重新 import 的启动开销。
     action = "增量刷新" if db.exists() else "先构建"
     print(f"[build] {docset_id} 索引{action}…", file=sys.stderr)
     try:
         stats = build_docset(hub_root, docset, defaults, rebuild=False)
     except DocsetBuildError as exc:
-        print(f"[error] 构建失败 docset={docset_id}: {exc}", file=sys.stderr)
-        return None
+        return None, make_docset_failure(
+            docset,
+            "build_failed",
+            str(exc),
+            index_path=db,
+            doc_root=doc_root,
+        )
     except Exception as exc:  # noqa: BLE001
-        print(f"[error] 构建失败 docset={docset_id}: {exc}", file=sys.stderr)
-        return None
+        return None, make_docset_failure(
+            docset,
+            "build_failed",
+            str(exc),
+            index_path=db,
+            doc_root=doc_root,
+        )
     if not db.exists():
-        print(f"[error] 构建失败 docset={docset_id}", file=sys.stderr)
-        return None
+        return None, make_docset_failure(
+            docset,
+            "build_failed",
+            f"构建结束后索引仍不存在: {db}",
+            index_path=db,
+            doc_root=doc_root,
+        )
     print(f"  stats: {stats}", file=sys.stderr)
-    return db
+    return db, None
 
 
 def query_like(
@@ -487,17 +785,19 @@ def search_one(
     try:
         row_items = collect_query_rows(conn, keywords, mode, section, top, include_nav)
         highlight_keywords = keywords
+        ranking_keywords = expand_keywords_for_fallback(keywords) or keywords
         if not row_items:
             row_items, expanded_keywords = collect_fallback_rows(conn, keywords, section, top, include_nav)
             if row_items:
                 highlight_keywords = expanded_keywords
+                ranking_keywords = expanded_keywords
     finally:
         conn.close()
 
     for item in row_items:
         item["matched_terms_count"] = max(
             int(item.get("matched_terms_count", 0)),
-            count_row_keyword_matches(item["row"], highlight_keywords),
+            count_row_keyword_matches(item["row"], ranking_keywords),
         )
 
     seen: set[str] = set()
@@ -539,7 +839,7 @@ def search_one(
     return out
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hub-root", default=None, help="DocsHub 根目录；未传时按 env/祖先目录自动发现")
     ap.add_argument("--docset", default=None, help="限定 docset id；不指定则跨 docset 查询")
@@ -549,16 +849,29 @@ def main() -> None:
     ap.add_argument("--include-nav", action="store_true")
     ap.add_argument("--rebuild-stale", action="store_true", help="查询前先做一次增量刷新（refresh 模式）")
     ap.add_argument("--list-docsets", action="store_true")
+    ap.add_argument("--status", action="store_true", help="检查初始化、hub root 与索引状态，不触发重建")
     ap.add_argument("--json", action="store_true", help="输出 JSON 而非纯文本")
     ap.add_argument("keywords", nargs="*")
     args = ap.parse_args()
+
+    if args.status:
+        payload = status_payload(args.hub_root)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print_status(payload)
+        return 0 if payload["ok"] else 1
 
     state = ensure_initialized("查询文档")
     hub_root = resolve_query_hub_root(args.hub_root, str(state.get("hub_root") or ""))
 
     if args.list_docsets:
+        if args.json:
+            payload = status_payload(str(hub_root))
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0 if payload["ok"] else 1
         list_docsets(hub_root)
-        return
+        return 0
 
     if not args.keywords:
         ap.error("需要至少一个关键词")
@@ -569,38 +882,99 @@ def main() -> None:
     cfg = load_docsets(hub_root)
     defaults = cfg.get("defaults", {})
     all_docsets = cfg.get("docsets", [])
-    targets = all_docsets if not args.docset else [d for d in all_docsets if d["id"] == args.docset]
+    targets = all_docsets if not args.docset else [d for d in all_docsets if str(d.get("id") or "") == args.docset]
     if not targets:
+        if args.json:
+            failed_docsets = [
+                {
+                    "id": str(args.docset or ""),
+                    "reason": "unknown_docset",
+                    "message": f"未找到 docset: {args.docset}",
+                }
+            ]
+            print(
+                json.dumps(
+                    search_payload(
+                        hub_root=hub_root,
+                        results=[],
+                        failed_docsets=failed_docsets,
+                        searched_docsets=[],
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
         raise SystemExit(f"未找到 docset: {args.docset}")
 
     all_results: list[dict[str, Any]] = []
+    failed_docsets: list[dict[str, Any]] = []
+    searched_docsets: list[str] = []
     for ds in targets:
-        db = ensure_index_ready(hub_root, ds, defaults, args.rebuild_stale)
+        db, failure = ensure_index_ready(hub_root, ds, defaults, args.rebuild_stale)
+        if failure is not None:
+            failed_docsets.append(failure)
         if db is None:
             continue
         try:
             rows = search_one(db, args.keywords, args.match, args.section, args.top, args.include_nav)
-        except sqlite3.OperationalError as e:
-            print(f"[warn] docset={ds['id']} 查询失败: {e}", file=sys.stderr)
+        except sqlite3.Error as e:
+            failed_docsets.append(
+                make_docset_failure(
+                    ds,
+                    "query_failed",
+                    str(e),
+                    index_path=db,
+                    doc_root=hub_root / str(ds.get("root") or ""),
+                )
+            )
             continue
+        searched_docsets.append(str(ds["id"]))
+        doc_root = resolve_docset_root(hub_root, ds)
         for r in rows:
+            try:
+                abs_path = resolve_indexed_abs_path(doc_root, str(r["rel_path"]))
+            except UnsafeIndexedPathError as exc:
+                failed_docsets.append(
+                    make_docset_failure(
+                        ds,
+                        "invalid_index_entry",
+                        str(exc),
+                        index_path=db,
+                        doc_root=doc_root,
+                    )
+                )
+                continue
             r["docset"] = ds["id"]
-            doc_root = (hub_root / ds["root"]).resolve()
             r["doc_root"] = doc_root.as_posix()
-            r["abs_path"] = (doc_root / r["rel_path"]).resolve().as_posix()
-        all_results.extend(rows)
+            r["abs_path"] = abs_path.as_posix()
+            all_results.append(r)
 
     # 跨 docset 合并后按 score 再排，取 top
     all_results.sort(key=lambda x: (-int(x.get("matched_terms_count", 0)), x["score"], x["rel_path"]))
     all_results = all_results[: args.top]
 
     if args.json:
-        print(json.dumps(all_results, ensure_ascii=False, indent=2))
-        return
+        print(
+            json.dumps(
+                search_payload(
+                    hub_root=hub_root,
+                    results=all_results,
+                    failed_docsets=failed_docsets,
+                    searched_docsets=searched_docsets,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if not failed_docsets else 1
 
+    if failed_docsets:
+        print_failed_docsets(failed_docsets)
     if not all_results:
-        print("(无结果)")
-        return
+        if not failed_docsets:
+            print("(无结果)")
+        return 0 if not failed_docsets else 1
 
     for i, r in enumerate(all_results, 1):
         print(f"[{i}] ({r['docset']}) {r['abs_path']}")
@@ -617,7 +991,8 @@ def main() -> None:
         print(f"    meta: {' '.join(meta_bits)}")
         print(f"    » {r['snippet']}")
         print()
+    return 0 if not failed_docsets else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -178,6 +178,20 @@ class ReviewScopeTests(unittest.TestCase):
         self.assertNotIn("harmony-ui-structure", summary["risk_tags"])
         self.assertNotIn("public-contract", summary["risk_tags"])
 
+    def test_build_summary_treats_skill_md_as_skill_contract_risk_not_docs(self) -> None:
+        changes = [
+            {"path": "skills/project-onboarding/SKILL.md", "status": "M", "additions": 5, "deletions": 1},
+        ]
+
+        summary = REVIEW_SCOPE.build_summary(Path("/tmp/repo"), changes, "explicit file list")
+
+        self.assertEqual(summary["categories"], {"skill-contract": 1})
+        self.assertIn("skill-contract", summary["risk_tags"])
+        self.assertIn("config-behavior", summary["risk_tags"])
+        self.assertIn("public-contract", summary["risk_tags"])
+        self.assertTrue(summary["test_gap"])
+        self.assertTrue(any("SKILL.md" in item for item in summary["review_focus"]))
+
     def test_build_summary_marks_java_and_react_review_risks(self) -> None:
         changes = [
             {"path": "src/main/java/com/example/user/UserController.java", "status": "M", "additions": 6, "deletions": 1},
@@ -295,8 +309,53 @@ class ReviewScopeTests(unittest.TestCase):
 
         self.assertEqual(scope_source, "explicit file list")
         self.assertEqual(changes[0]["path"], "C:/tmp/file.ts")
-        self.assertEqual(changes[0]["status"], "missing")
+        self.assertEqual(changes[0]["status"], "outside_repo")
         self.assertEqual(changes[0]["additions"], 0)
+
+    def test_collect_explicit_files_does_not_read_posix_absolute_paths_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            outside_file = root / "outside.py"
+            outside_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+            changes, scope_source = REVIEW_SCOPE.collect_explicit_files(repo, [str(outside_file)])
+
+        self.assertEqual(scope_source, "explicit file list")
+        self.assertEqual(changes[0]["path"], str(outside_file).replace("\\", "/"))
+        self.assertEqual(changes[0]["status"], "outside_repo")
+        self.assertEqual(changes[0]["additions"], 0)
+
+    def test_build_review_context_does_not_generate_findings(self) -> None:
+        summary = REVIEW_SCOPE.build_summary(
+            Path("/tmp/repo"),
+            [{"path": "src/app.py", "status": "M", "additions": 2, "deletions": 1}],
+            "explicit file list",
+        )
+        prepared = REVIEW_SCOPE.prepare_summary_for_output(summary)
+
+        context = REVIEW_SCOPE.build_review_context(prepared)
+
+        self.assertEqual(context["package_type"], "review-context")
+        self.assertFalse(context["findings"]["generated"])
+        self.assertEqual(context["findings"]["items"], [])
+        self.assertEqual(context["scope"]["changed_files"][0]["path"], "src/app.py")
+        self.assertTrue(context["test_gap"])
+
+    def test_git_failure_is_wrapped_in_error_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            with self.assertRaises(REVIEW_SCOPE.GitCommandError) as captured:
+                REVIEW_SCOPE.git(repo, "definitely-not-a-git-command")
+
+            envelope = REVIEW_SCOPE.build_error_envelope(repo, captured.exception)
+
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["type"], "git_command_error")
+        self.assertEqual(envelope["error"]["kind"], "nonzero_exit")
+        self.assertIn("definitely-not-a-git-command", envelope["error"]["command"])
+        self.assertEqual(envelope["error"]["timeout_seconds"], REVIEW_SCOPE.GIT_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":

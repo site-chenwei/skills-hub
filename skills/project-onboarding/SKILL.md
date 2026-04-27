@@ -29,6 +29,7 @@ description: Use this skill when entering an unfamiliar repository, before cross
 
 1. 先跑事实扫描。
    - 优先执行 `<python_cmd> <skill_root>/run.py project_facts --repo <repo> --format markdown`
+   - 需要更自然的高层入口名时，也可以执行 `<python_cmd> <skill_root>/run.py onboard --repo <repo> --format markdown`；当前该入口等价于 `project_facts`。
    - 用它先拿到文档入口、技术栈信号、顶层目录、验证命令候选和待确认项。
 2. 再读关键入口。
    - 默认顺序是 `PROJECT.md` -> `README*` -> 顶层配置文件 -> `docs/` -> 关键入口源码与测试。

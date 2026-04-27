@@ -26,6 +26,7 @@ from _bootstrap import runtime_root  # noqa: E402
 from _common import DependencyMissingError, parse_front_matter  # noqa: E402
 from build_docset_index import compute_build_signature, maybe_vacuum, merge_config  # noqa: E402
 from local_doc_init import install_requirements  # noqa: E402
+from search_docs import expand_keywords_for_fallback, fts_escape, like_escape  # noqa: E402
 
 
 def run_subprocess(*args, **kwargs):
@@ -97,6 +98,15 @@ class DocsHubCommonTest(unittest.TestCase):
         with mock.patch("builtins.__import__", side_effect=fake_import):
             with self.assertRaises(DependencyMissingError):
                 parse_front_matter("---\ntitle: missing yaml\n---\ncontent\n")
+
+    def test_fts_escape_preserves_hyphen_inside_quoted_phrase(self) -> None:
+        self.assertEqual('"sing-box"', fts_escape("sing-box"))
+
+    def test_fallback_splits_hyphenated_query(self) -> None:
+        self.assertEqual(["sing", "box"], expand_keywords_for_fallback(["sing-box"]))
+
+    def test_like_escape_escapes_sql_wildcards(self) -> None:
+        self.assertEqual("\\%\\_a\\\\b", like_escape("%_a\\b"))
 
     def test_maybe_vacuum_reclaims_free_pages(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
@@ -296,7 +306,11 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             text=True,
             env=self.subprocess_env,
         )
-        return json.loads(proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["partial"], payload)
+        self.assertFalse(payload["failed"], payload)
+        return payload["results"]
 
     def read_build_signature(self, hub_root: Path, docset_id: str = "testset") -> str | None:
         db_path = hub_root / "index" / f"{docset_id}.sqlite"
@@ -334,9 +348,113 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             text=True,
             env=self.subprocess_env,
         )
-        rows = json.loads(proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"], payload)
+        rows = payload["results"]
         self.assertEqual(["root.md"], [row["rel_path"] for row in rows])
         self.assertTrue(rows[0]["abs_path"].endswith("/docs/testset/root.md"))
+
+    def test_build_derives_source_url_from_first_markdown_link(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "derived-source.md",
+            """
+            ---
+            title: "derived source"
+            menu_path:
+              - "指南"
+            ---
+
+            # derived source
+
+            `https://` scheme by itself is not a source URL.
+
+            来源：<https://example.com/derived-source>.
+
+            derivedsourcesentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        rows = self.run_search(hub_root, "derivedsourcesentinel", "--docset", "testset")
+        self.assertEqual("https://example.com/derived-source", rows[0]["source_url"])
+
+        warnings = [
+            json.loads(line)
+            for line in (hub_root / "index" / "testset.warnings.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(["derived_source_url"], [item["kind"] for item in warnings])
+
+    def test_json_search_reports_missing_index_as_failed_docset(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "missing-index.md",
+            """
+            ---
+            title: "missing index"
+            source_url: "https://example.com/missing-index"
+            menu_path:
+              - "指南"
+            ---
+
+            # missing index
+
+            missingindexsentinel
+            """,
+        )
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "missingindexsentinel", "--docset", "testset", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["ok"], payload)
+        self.assertFalse(payload["partial"], payload)
+        self.assertTrue(payload["failed"], payload)
+        self.assertEqual([], payload["results"])
+        self.assertEqual("testset", payload["failed_docsets"][0]["id"])
+        self.assertEqual("missing_index", payload["failed_docsets"][0]["reason"])
+
+    def test_plain_search_reports_missing_index_without_no_result_message(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "missing-index-plain.md",
+            """
+            ---
+            title: "missing index plain"
+            source_url: "https://example.com/missing-index-plain"
+            menu_path:
+              - "指南"
+            ---
+
+            # missing index plain
+
+            missingindexplainsentinel
+            """,
+        )
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "missingindexplainsentinel", "--docset", "testset"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        self.assertNotIn("(无结果)", proc.stdout)
+        self.assertIn("failed docset=testset", proc.stderr)
+        self.assertIn("missing_index", proc.stderr)
 
     def test_rebuild_stale_refreshes_existing_index(self) -> None:
         hub_root = self.make_hub()
@@ -625,7 +743,7 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         self.assertEqual("功能介绍 > 常见问题", faq_rows[0]["heading_path"])
 
     def test_refresh_with_missing_docset_root_skips_that_docset(self) -> None:
-        """refresh 模式遇到 docset root 缺失时应跳过该 docset，其他 docset 照常返回结果。"""
+        """refresh 模式遇到 docset root 缺失时应显式标记 partial，不能伪装成全量成功。"""
         hub_root = self.make_hub()
         self.write_doc(
             hub_root,
@@ -647,8 +765,142 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         cfg["docsets"].append({"id": "broken", "name": "Broken", "root": "docs/does-not-exist"})
         (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        rows = self.run_search(hub_root, "--rebuild-stale", "refreshmissingrootok")
-        self.assertEqual(["ok.md"], [row["rel_path"] for row in rows])
+        self.ensure_repo_skill_initialized()
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "--rebuild-stale", "refreshmissingrootok", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+        self.assertNotEqual(0, proc.returncode)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["ok"], payload)
+        self.assertTrue(payload["partial"], payload)
+        self.assertFalse(payload["failed"], payload)
+        self.assertEqual(["ok.md"], [row["rel_path"] for row in payload["results"]])
+        self.assertEqual(["broken"], [item["id"] for item in payload["failed_docsets"]])
+        self.assertEqual("missing_root", payload["failed_docsets"][0]["reason"])
+
+    def test_search_with_existing_index_missing_docset_root_fails_explicitly(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "indexed.md",
+            """
+            ---
+            title: "indexed doc"
+            source_url: "https://example.com/indexed"
+            menu_path:
+              - "指南"
+            ---
+
+            # indexed doc
+
+            missingrootlookupsentinel
+            """,
+        )
+        self.run_build(hub_root)
+        shutil.rmtree(hub_root / "docs" / "testset")
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "missingrootlookupsentinel", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["ok"], payload)
+        self.assertFalse(payload["partial"], payload)
+        self.assertTrue(payload["failed"], payload)
+        self.assertEqual([], payload["results"])
+        self.assertEqual(["testset"], [item["id"] for item in payload["failed_docsets"]])
+        self.assertEqual("missing_root", payload["failed_docsets"][0]["reason"])
+
+    def test_search_with_stale_index_fails_explicitly_without_refresh(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "stale.md",
+            """
+            ---
+            title: "stale doc"
+            source_url: "https://example.com/stale"
+            menu_path:
+              - "指南"
+            ---
+
+            # stale doc
+
+            stalequerysentinel
+            """,
+        )
+        self.run_build(hub_root)
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["defaults"]["chunk"]["target_chars"] = 900
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "stalequerysentinel", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["ok"], payload)
+        self.assertTrue(payload["failed"], payload)
+        self.assertEqual([], payload["results"])
+        self.assertEqual(["testset"], [item["id"] for item in payload["failed_docsets"]])
+        self.assertEqual("stale_index", payload["failed_docsets"][0]["reason"])
+
+    def test_search_rejects_indexed_rel_path_outside_doc_root(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "escape.md",
+            """
+            ---
+            title: "escape doc"
+            source_url: "https://example.com/escape"
+            menu_path:
+              - "指南"
+            ---
+
+            # escape doc
+
+            indexedescapecheck
+            """,
+        )
+        self.run_build(hub_root)
+        db_path = hub_root / "index" / "testset.sqlite"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE documents SET rel_path = '../escape.md' WHERE rel_path = 'escape.md'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "indexedescapecheck", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["ok"], payload)
+        self.assertEqual([], payload["results"])
+        self.assertEqual(["testset"], [item["id"] for item in payload["failed_docsets"]])
+        self.assertEqual("invalid_index_entry", payload["failed_docsets"][0]["reason"])
+        self.assertIn("越过 doc_root 边界", payload["failed_docsets"][0]["message"])
 
     def test_section_filter_only_returns_matching_section(self) -> None:
         hub_root = self.make_hub()
@@ -710,6 +962,64 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         self.assertEqual([], hidden_rows)
         self.assertEqual(["sub/nav.md"], [row["rel_path"] for row in visible_rows])
         self.assertTrue(visible_rows[0]["is_nav"])
+
+    def test_short_token_like_fallback_treats_percent_and_underscore_literally(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "sub/plain.md",
+            """
+            ---
+            title: "plain doc"
+            source_url: "https://example.com/plain"
+            menu_path:
+              - "指南"
+            ---
+
+            # plain doc
+
+            this document has neither wildcard marker
+            """,
+        )
+        self.write_doc(
+            hub_root,
+            "sub/percent.md",
+            """
+            ---
+            title: "percent doc"
+            source_url: "https://example.com/percent"
+            menu_path:
+              - "指南"
+            ---
+
+            # percent doc
+
+            literal % marker
+            """,
+        )
+        self.write_doc(
+            hub_root,
+            "sub/underscore.md",
+            """
+            ---
+            title: "underscore doc"
+            source_url: "https://example.com/underscore"
+            menu_path:
+              - "指南"
+            ---
+
+            # underscore doc
+
+            literal _ marker
+            """,
+        )
+        self.run_build(hub_root)
+
+        percent_rows = self.run_search(hub_root, "%", "--docset", "testset")
+        underscore_rows = self.run_search(hub_root, "_", "--docset", "testset")
+
+        self.assertEqual(["sub/percent.md"], [row["rel_path"] for row in percent_rows])
+        self.assertEqual(["sub/underscore.md"], [row["rel_path"] for row in underscore_rows])
 
     def test_title_fallback_prefers_markdown_heading_then_filename_stem(self) -> None:
         hub_root = self.make_hub()
@@ -828,6 +1138,83 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         rows = self.run_search(hub_root, "输入法 光标 跟随", "--docset", "testset")
         self.assertEqual(["sub/phrase-fallback.md"], [row["rel_path"] for row in rows])
         self.assertIn("【输入法】", rows[0]["snippet"])
+
+    def test_hyphenated_phrase_falls_back_to_split_terms(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "sub/sing-box.md",
+            """
+            ---
+            title: "sing-box guide"
+            source_url: "https://example.com/sing-box"
+            menu_path:
+              - "指南"
+            ---
+
+            # sing-box guide
+
+            sing-box rule-set matcher
+            """,
+        )
+        self.run_build(hub_root)
+        rows = self.run_search(hub_root, "sing-box", "--docset", "testset")
+        self.assertEqual(["sub/sing-box.md"], [row["rel_path"] for row in rows])
+        self.assertEqual("https://example.com/sing-box", rows[0]["source_url"])
+
+    def test_exact_hyphen_match_ranks_above_cross_docset_partial_fallback(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "sub/sing-box.md",
+            """
+            ---
+            title: "sing-box guide"
+            source_url: "https://example.com/sing-box"
+            menu_path:
+              - "指南"
+            ---
+
+            # sing-box guide
+
+            sing-box rule-set matcher
+            """,
+        )
+
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"].append({"id": "extraset", "name": "Extra", "root": "docs/extraset"})
+        (hub_root / "docs" / "extraset").mkdir(parents=True, exist_ok=True)
+        (hub_root / "docs" / "extraset" / "toybox.md").write_text(
+            textwrap.dedent(
+                """
+                ---
+                title: "toybox"
+                source_url: "https://example.com/toybox"
+                menu_path:
+                  - "指南"
+                ---
+
+                # toybox
+
+                toybox only matches the box fragment
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        run_subprocess(
+            [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        rows = self.run_search(hub_root, "sing-box")
+        self.assertEqual("testset", rows[0]["docset"])
+        self.assertEqual("sub/sing-box.md", rows[0]["rel_path"])
+        self.assertGreater(rows[0]["matched_terms_count"], rows[1]["matched_terms_count"])
 
     def test_multi_phrase_fallback_merges_split_results(self) -> None:
         hub_root = self.make_hub()
@@ -1038,6 +1425,136 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         self.assertFalse((hub_root / "index" / "testset.sqlite-shm").exists())
         self.assertFalse((hub_root / "index" / "extraset.sqlite-wal").exists())
         self.assertFalse((hub_root / "index" / "extraset.sqlite-shm").exists())
+
+    def test_status_json_reports_docset_index_health_without_rebuild(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "status.md",
+            """
+            ---
+            title: "status doc"
+            source_url: "https://example.com/status"
+            menu_path:
+              - "指南"
+            ---
+
+            # status doc
+
+            statussentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "--status", "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["partial"], payload)
+        self.assertFalse(payload["failed"], payload)
+        self.assertEqual(["testset"], payload["healthy_docsets"])
+        self.assertEqual("indexed", payload["docsets"][0]["status"])
+        self.assertEqual(1, payload["docsets"][0]["documents"])
+
+    def test_query_with_explicit_invalid_hub_root_fails_without_fallback(self) -> None:
+        self.ensure_repo_skill_initialized()
+        valid_hub = self.make_hub()
+        invalid_root = valid_hub / "not-a-hub"
+        invalid_root.mkdir(parents=True, exist_ok=True)
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(invalid_root), "--list-docsets", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(valid_hub),
+            env=self.env_with({"CODEX_DOC_HUB": str(valid_hub)}),
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("指定路径不是有效的 DocsHub 根目录", proc.stderr)
+
+    def test_build_rejects_docset_id_path_traversal_without_writing_outside_index(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "safe.md",
+            """
+            ---
+            title: "safe doc"
+            source_url: "https://example.com/safe"
+            menu_path:
+              - "指南"
+            ---
+
+            # safe doc
+
+            safe content
+            """,
+        )
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"][0]["id"] = "../escape"
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        proc = run_subprocess(
+            [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("docset id", proc.stderr)
+        self.assertFalse((hub_root / "escape.sqlite").exists())
+
+    def test_build_rejects_docset_root_outside_hub_root(self) -> None:
+        self.ensure_repo_skill_initialized()
+        hub_root = self.make_hub()
+        outside_tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmpdir.cleanup)
+        outside_root = Path(outside_tmpdir.name)
+        outside_root.mkdir(parents=True, exist_ok=True)
+        (outside_root / "outside.md").write_text(
+            textwrap.dedent(
+                """
+                ---
+                title: "outside doc"
+                source_url: "https://example.com/outside"
+                menu_path:
+                  - "指南"
+                ---
+
+                # outside doc
+
+                outside content
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"][0]["root"] = str(outside_root)
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        proc = run_subprocess(
+            [PYTHON, str(BUILD_SCRIPT), "--hub-root", str(hub_root), "--docset", "all", "--rebuild"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("docset root", proc.stderr)
+        self.assertFalse((hub_root / "index" / "testset.sqlite").exists())
 
     def test_init_fails_without_resolvable_hub_root(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
@@ -1385,7 +1902,9 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             cwd=tmpdir.name,
             env=self.subprocess_env,
         )
-        rows = json.loads(proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"], payload)
+        rows = payload["results"]
         self.assertEqual(["sub/a.md"], [row["rel_path"] for row in rows])
 
     def test_refresh_prefers_saved_init_hub_root(self) -> None:
@@ -1442,7 +1961,9 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
             cwd=tmpdir.name,
             env=self.subprocess_env,
         )
-        rows = json.loads(proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"], payload)
+        rows = payload["results"]
         self.assertEqual(["sub/a.md"], [row["rel_path"] for row in rows])
 
 

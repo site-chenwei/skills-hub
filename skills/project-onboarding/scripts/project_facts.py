@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import json
+import shlex
 from pathlib import Path
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ should have tomllib
-    tomllib = None
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
 
 
 IGNORED_DIRS = {
@@ -154,9 +160,15 @@ REACT_TEST_OR_STORYBOOK_DEPS = {
 
 MODULE_MARKER_NAMES = {
     "package.json",
+    "pyproject.toml",
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
+}
+
+SKILL_MODULE_MARKER_NAMES = {
+    "SKILL.md",
+    "run.py",
 }
 
 
@@ -183,10 +195,7 @@ def module_path(repo: Path, path: Path) -> str:
 
 
 def quote_command_path(path_text: str) -> str:
-    if all(char.isalnum() or char in "/._-" for char in path_text):
-        return path_text
-    escaped = path_text.replace('"', '\\"')
-    return f'"{escaped}"'
+    return shlex.quote(path_text)
 
 
 def scope_command(command: str, path_text: str) -> str:
@@ -278,18 +287,204 @@ def load_package_json(repo: Path) -> tuple[dict | None, str | None]:
         return None, format_parse_error(package_json, error)
 
 
+def strip_toml_comment(line: str) -> str:
+    in_string = False
+    quote_char = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if in_string and char == quote_char:
+                in_string = False
+                quote_char = ""
+            elif not in_string:
+                in_string = True
+                quote_char = char
+            continue
+        if char == "#" and not in_string:
+            return line[:index].strip()
+    return line.strip()
+
+
+def parse_toml_key(key: str) -> list[str]:
+    parts = [part.strip().strip('"').strip("'") for part in key.split(".")]
+    if not parts or any(not part for part in parts):
+        raise ValueError(f"无效键名：{key}")
+    return parts
+
+
+def parse_simple_toml_value(value: str):
+    value = value.strip()
+    if not value:
+        raise ValueError("缺少值")
+    if value in {"true", "false"}:
+        return value == "true"
+    if value.startswith(('"', "'")) != value.endswith(('"', "'")):
+        raise ValueError("字符串引号不匹配")
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    if value.startswith("[") != value.endswith("]"):
+        raise ValueError("数组括号不匹配")
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_simple_toml_value(item.strip()) for item in split_toml_array_items(inner) if item.strip()]
+    if value.startswith("{") != value.endswith("}"):
+        raise ValueError("内联表括号不匹配")
+    if value.startswith("{") and value.endswith("}"):
+        raise ValueError("简化 TOML 解析器不支持内联表")
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError as error:
+        raise ValueError(f"不支持的值：{value}") from error
+
+
+def split_toml_array_items(inner: str) -> list[str]:
+    items = []
+    current = []
+    in_string = False
+    quote_char = ""
+    escaped = False
+    for char in inner:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            current.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            current.append(char)
+            if in_string and char == quote_char:
+                in_string = False
+                quote_char = ""
+            elif not in_string:
+                in_string = True
+                quote_char = char
+            continue
+        if char == "," and not in_string:
+            items.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    if in_string:
+        raise ValueError("数组字符串引号不匹配")
+    tail = "".join(current).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def is_incomplete_toml_array(value: str) -> bool:
+    if not value.lstrip().startswith("["):
+        return False
+    in_string = False
+    quote_char = ""
+    escaped = False
+    depth = 0
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if in_string and char == quote_char:
+                in_string = False
+                quote_char = ""
+            elif not in_string:
+                in_string = True
+                quote_char = char
+            continue
+        if in_string:
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+    return depth > 0
+
+
+def parse_simple_toml(text: str) -> dict:
+    data: dict = {}
+    current = data
+    pending_array: dict | None = None
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = strip_toml_comment(raw_line)
+        if pending_array is not None:
+            if line:
+                pending_array["values"].append(line)
+            value = " ".join(pending_array["values"])
+            if is_incomplete_toml_array(value):
+                continue
+            pending_array["target"][pending_array["key"]] = parse_simple_toml_value(value)
+            pending_array = None
+            continue
+        if not line:
+            continue
+        if line.startswith("["):
+            if not line.endswith("]") or line in {"[]", "[[]]"}:
+                raise ValueError(f"第 {line_number} 行表头无效")
+            section = line.strip("[]").strip()
+            current = data
+            for part in parse_toml_key(section):
+                current = current.setdefault(part, {})
+                if not isinstance(current, dict):
+                    raise ValueError(f"第 {line_number} 行表头冲突")
+            continue
+        if "=" not in line:
+            raise ValueError(f"第 {line_number} 行缺少 '='")
+        key, value = line.split("=", 1)
+        target = current
+        parts = parse_toml_key(key.strip())
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+            if not isinstance(target, dict):
+                raise ValueError(f"第 {line_number} 行键名冲突")
+        value_text = value.strip()
+        if is_incomplete_toml_array(value_text):
+            pending_array = {
+                "line_number": line_number,
+                "target": target,
+                "key": parts[-1],
+                "values": [value_text],
+            }
+            continue
+        target[parts[-1]] = parse_simple_toml_value(value_text)
+    if pending_array is not None:
+        raise ValueError(f"第 {pending_array['line_number']} 行数组未闭合")
+    return data
+
+
 def load_pyproject(repo: Path) -> tuple[dict | None, str | None]:
     pyproject = repo / "pyproject.toml"
-    if not pyproject.exists() or tomllib is None:
+    if not pyproject.exists():
         return None, None
     try:
-        return tomllib.loads(read_text(pyproject)), None
-    except (tomllib.TOMLDecodeError, OSError) as error:
+        text = read_text(pyproject)
+        if tomllib is not None:
+            return tomllib.loads(text), None
+        return parse_simple_toml(text), None
+    except (OSError, ValueError) as error:
         return None, format_parse_error(pyproject, error)
 
 
 def detect_configs(repo: Path) -> list[str]:
     config_names = [
+        "SKILL.md",
+        "run.py",
         "package.json",
         "pyproject.toml",
         "requirements.txt",
@@ -521,6 +716,14 @@ def has_python_tests(repo: Path) -> bool:
     return False
 
 
+def has_skills_hub_unittest_aggregator(repo: Path) -> bool:
+    return (repo / "skills" / "test_all_skills.py").is_file()
+
+
+def is_skill_module_root(repo: Path) -> bool:
+    return (repo / "SKILL.md").is_file() and (repo / "run.py").is_file()
+
+
 def detect_validation_commands(
     repo: Path,
     package_data: dict | None,
@@ -536,8 +739,17 @@ def detect_validation_commands(
                 add_candidate(candidates, package_script_command(package_manager, script_name), reason)
 
     if "python" in primary_stacks:
-        if has_python_tests(repo):
-            add_candidate(candidates, f"{PYTHON_CMD_PLACEHOLDER} -m unittest discover", "Python test files detected")
+        if has_skills_hub_unittest_aggregator(repo):
+            add_candidate(
+                candidates,
+                f"{PYTHON_CMD_PLACEHOLDER} -m unittest skills.test_all_skills",
+                "skills/test_all_skills.py aggregate unittest entry detected",
+            )
+        elif has_python_tests(repo):
+            command = f"{PYTHON_CMD_PLACEHOLDER} -m unittest discover"
+            if is_skill_module_root(repo) and (repo / "tests").is_dir():
+                command = f"{command} -s tests"
+            add_candidate(candidates, command, "Python test files detected")
         if (
             pyproject_data is not None
             or (repo / "requirements.txt").exists()
@@ -582,9 +794,20 @@ def detect_entry_points(repo: Path) -> list[str]:
 def detect_module_roots(repo: Path) -> list[Path]:
     roots: set[Path] = set()
     for path in iter_files(repo):
-        if path.name in MODULE_MARKER_NAMES:
+        if path.name in MODULE_MARKER_NAMES or is_skill_module_marker(repo, path):
             roots.add(path.parent)
     return sorted(roots, key=lambda path: module_path(repo, path))
+
+
+def is_skill_module_marker(repo: Path, path: Path) -> bool:
+    if path.name not in SKILL_MODULE_MARKER_NAMES:
+        return False
+    if path.name == "SKILL.md":
+        return True
+    if (path.parent / "SKILL.md").is_file():
+        return True
+    relative_parts = path.relative_to(repo).parts
+    return len(relative_parts) == 3 and relative_parts[0] == "skills"
 
 
 def localize_module_validation_commands(

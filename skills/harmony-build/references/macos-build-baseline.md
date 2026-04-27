@@ -9,8 +9,10 @@
 ## 最终结论规则
 
 - 只有实际运行了 `verify --task <task>` 且任务成功，才能说 Mac 本机 hvigor 验证通过。
-- `detect` 默认运行 `hvigor tasks` 作为环境 preflight；它能证明环境和任务列表可用，但不能替代具体构建任务。
+- `detect` 默认运行 `hvigor tasks` 作为环境 preflight；它能证明环境和任务列表可用，但不能替代具体构建任务。preflight 默认超时为 120 秒，可用 `detect --timeout-seconds <seconds>` 覆盖；非 JSON 模式会在等待 hvigor 前输出 preflight 进度。
 - `detect --skip-preflight` 只代表静态探测，不代表 hvigor 已验证。
+- `build` 是面向 agent 的高层构建入口，会自动列出公开 tasks、选择构建任务并运行；自动列任务阶段成功时读取完整 tasks 输出用于解析公开任务，非 JSON 模式会输出阶段进度，最终输出成功/失败、阶段、任务、退出码和耗时。成功时不回传 hvigor 日志，失败时才回传错误尾部。
+- `build --timeout-seconds` 是整条 build flow 的 hvigor 等待预算，默认 900 秒；自动 `hvigor tasks` 阶段默认 `--list-timeout-seconds 120`，避免任务列表阶段长时间空等。超时后进程清理会有短暂兜底等待。
 - `verify --task <task>` 在没有可用缓存时不会先插入 `hvigor tasks`；它只做静态探测，然后直接运行目标任务。
 
 ## 已验证的工具链形态
@@ -32,6 +34,10 @@
   - `~/Library/Huawei/Sdk`
   - `~/Library/Application Support/Huawei/DevEcoStudio/Sdk`
   - DevEco Studio `.app` 包内的 `Contents/sdk` / `Contents/Sdk`
+- SDK 选择会参考项目 `build-profile.json5` 的 `runtimeOS`：
+  - `runtimeOS: "HarmonyOS"` 时，优先选择包含 `default/hms` 与 `default/openharmony` 的 DevEco SDK 根目录，例如 `DevEco-Studio.app/Contents/sdk`。
+  - OpenHarmony API 版本目录，例如 `~/Library/OpenHarmony/Sdk/<api>`，不能单独满足 HarmonyOS / HMS 构建链路。
+  - `runtimeOS: "OpenHarmony"` 或未识别 `runtimeOS` 时，仍保留 OpenHarmony 版本目录作为候选。
 - hvigor 优先使用项目根目录的 `hvigorw` / `hvigor`，其次使用 `PATH` 或 DevEco Studio `.app` 内的 hvigor。
 
 ## 探测策略
@@ -39,7 +45,7 @@
 1. 解析本地仓库路径。
 2. 识别 Harmony 项目标记。
 3. 解析 Node、Java、Harmony SDK、DevEco Studio、`ohpm`、`hdc` 和 hvigor。
-4. 默认运行 `hvigor tasks` 做 preflight。
+4. 默认以 120 秒超时运行 `hvigor tasks` 做 preflight，非 JSON 模式会先输出进度。
 5. preflight 成功后保存按仓库隔离的 ready baseline。
 6. 后续验证默认复用 baseline；没有 baseline 时，`verify` 直接运行目标任务，任务成功后再保存 baseline。
 
@@ -58,7 +64,7 @@
 ### `sdk_missing`
 
 - 含义：未找到可识别的 Harmony SDK 根。
-- 处理：优先确认 DevEco Studio SDK 是否已安装；必要时设置 `DEVECO_SDK_HOME` 指向实际 SDK 版本目录。
+- 处理：优先确认 DevEco Studio SDK 是否已安装；HarmonyOS 项目应让 `DEVECO_SDK_HOME` 指向 DevEco 的 SDK 根目录，而不是只指向 OpenHarmony API 版本目录。
 
 ### `hvigor_missing_or_not_executable`
 
@@ -74,6 +80,7 @@
 
 - 如果 `detect` 命中缓存且缓存来自成功 preflight，可以说当前仓库复用了已验证 ready baseline。
 - 如果 `detect --skip-preflight` 成功，只能说静态依赖存在。
+- 如果 `build` 成功，可以说自动选择的 Mac 本机 hvigor 构建任务通过，不需要复述 hvigor 成功日志；如果失败，报告 `BUILD FAILED` 中的阶段、任务、退出码、是否超时和输出尾部。
 - 如果 `verify` 成功，可以明确说 Mac 本机对应 hvigor 任务通过。
 - 如果 `verify` 失败，直接报告任务失败和输出尾部，不要替用户脑补根因。
 - 不要默认运行 `assembleApp`；优先选能证明当前结论的最小公开 hvigor 任务。

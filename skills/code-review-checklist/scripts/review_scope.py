@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path, PureWindowsPath
 
+
+GIT_TIMEOUT_SECONDS = 15
 
 DEPENDENCY_FILES = {
     "package.json",
@@ -186,6 +191,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head", help="Git head revision. Defaults to HEAD when --base is used.")
     parser.add_argument("--files", nargs="*", help="Explicit file list for non-git mode.")
     parser.add_argument(
+        "--context",
+        action="store_true",
+        help="Return a review-context package; does not infer or fabricate findings.",
+    )
+    parser.add_argument(
         "--format",
         choices=("markdown", "json"),
         default="markdown",
@@ -194,25 +204,97 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def stringify_process_output(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+class GitCommandError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        kind: str,
+        command: list[str],
+        cwd: Path,
+        returncode: int | None = None,
+        stdout=None,
+        stderr=None,
+        timeout_seconds: int | None = None,
+    ) -> None:
+        self.kind = kind
+        self.command = command
+        self.cwd = cwd
+        self.returncode = returncode
+        self.stdout = stringify_process_output(stdout)
+        self.stderr = stringify_process_output(stderr)
+        self.timeout_seconds = timeout_seconds
+        super().__init__(self.message)
+
+    @property
+    def message(self) -> str:
+        command_text = " ".join(self.command)
+        if self.kind == "timeout":
+            return f"git 命令在 {self.timeout_seconds}s 后超时：{command_text}"
+        return f"git 命令退出码为 {self.returncode}：{command_text}"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "git_command_error",
+            "kind": self.kind,
+            "command": self.command,
+            "cwd": str(self.cwd),
+            "returncode": self.returncode,
+            "timeout_seconds": self.timeout_seconds,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "message": self.message,
+        }
+
+
+def run_git_process(repo: Path, args: tuple[str, ...], *, check: bool, binary: bool) -> subprocess.CompletedProcess:
+    command = ["git", *args]
+    kwargs = {
+        "cwd": repo,
+        "check": False,
+        "capture_output": True,
+        "timeout": GIT_TIMEOUT_SECONDS,
+    }
+    if not binary:
+        kwargs.update({"text": True, "encoding": "utf-8", "errors": "replace"})
+    try:
+        result = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired as error:
+        raise GitCommandError(
+            kind="timeout",
+            command=command,
+            cwd=repo,
+            stdout=error.output,
+            stderr=error.stderr,
+            timeout_seconds=GIT_TIMEOUT_SECONDS,
+        ) from error
+
+    if check and result.returncode != 0:
+        raise GitCommandError(
+            kind="nonzero_exit",
+            command=command,
+            cwd=repo,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            timeout_seconds=GIT_TIMEOUT_SECONDS,
+        )
+    return result
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        check=check,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    return run_git_process(repo, args, check=check, binary=False)
 
 
 def git_bytes(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        check=check,
-        capture_output=True,
-    )
+    return run_git_process(repo, args, check=check, binary=True)
 
 
 def git_root(repo: Path) -> Path | None:
@@ -247,13 +329,23 @@ def normalize_path_for_output(raw_path: str) -> str:
     return raw_path.replace("\\", "/")
 
 
-def path_for_existing_check(repo: Path, path_text: str) -> Path | None:
-    path = Path(path_text)
+def resolve_explicit_file(repo: Path, raw_path: str) -> tuple[str, Path | None, bool]:
+    if is_windows_absolute_path(raw_path):
+        return normalize_path_for_output(raw_path), None, True
+
+    canonical_repo = repo.expanduser().resolve()
+    path = Path(raw_path)
     if path.is_absolute():
-        return path
-    if is_windows_absolute_path(path_text):
-        return None
-    return repo / path_text
+        resolved = path.expanduser().resolve()
+        outside_output = raw_path
+    else:
+        resolved = (canonical_repo / path).resolve()
+        outside_output = raw_path
+
+    try:
+        return normalize_path_for_output(str(resolved.relative_to(canonical_repo))), resolved, False
+    except ValueError:
+        return normalize_path_for_output(outside_output), None, True
 
 
 def existing_line_count(path: Path) -> int:
@@ -427,14 +519,13 @@ def merge_change_lists(name_status_entries: list[dict], numstat_entries: list[di
 def collect_explicit_files(repo: Path, files: list[str]) -> tuple[list[dict], str]:
     changes = []
     for raw_path in files:
-        relpath = normalize_relpath(repo, raw_path)
-        path = path_for_existing_check(repo, relpath)
+        relpath, path, outside_repo = resolve_explicit_file(repo, raw_path)
         path_exists = path is not None and path.exists()
         changes.append(
             {
                 "path": relpath,
-                "status": "M" if path_exists else "missing",
-                "additions": existing_line_count(path) if path_exists else 0,
+                "status": "outside_repo" if outside_repo else "M" if path_exists else "missing",
+                "additions": existing_line_count(path) if path_exists and not outside_repo else 0,
                 "deletions": 0,
             }
         )
@@ -567,6 +658,8 @@ def categorize_path(path_text: str) -> str:
     name = path_name(path_text)
     if is_test_path(path_text):
         return "tests"
+    if name == "skill.md":
+        return "skill-contract"
     if name in DEPENDENCY_FILE_NAMES:
         return "dependencies"
     if is_harmony_resource_path(path_text):
@@ -651,6 +744,10 @@ def detect_risk_tags(changes: list[dict]) -> list[str]:
             tags.add("config-behavior")
         if category == "ci":
             tags.add("delivery-pipeline")
+        if category == "skill-contract":
+            tags.add("skill-contract")
+            tags.add("config-behavior")
+            tags.add("public-contract")
         if has_segment(change["path"], JAVA_PUBLIC_CONTRACT_SEGMENTS):
             tags.add("public-contract")
         if has_segment(change["path"], JAVA_CONFIG_SEGMENTS) or is_java_profile_config(change["path"]):
@@ -717,6 +814,8 @@ def review_focus(risk_tags: list[str], categories: dict[str, int], test_gap: boo
         items.append("补看输入校验、权限边界和敏感信息处理。")
     if "delivery-pipeline" in risk_tags:
         items.append("检查 CI/CD 或发布脚本变化是否影响现有交付链路。")
+    if "skill-contract" in risk_tags:
+        items.append("SKILL.md 改动需核对触发条件、运行约定、对外契约和附件路径是否与实现保持一致。")
     if "performance-sensitive" in risk_tags:
         items.append("确认关键路径不会引入额外 IO、N+1、缓存失效或批处理回归。")
     if categories.get("source") and test_gap:
@@ -749,6 +848,7 @@ def build_summary(repo: Path, changes: list[dict], scope_source: str) -> dict:
         "react-routing",
         "react-client-contract",
         "react-ui",
+        "skill-contract",
     }
     has_risky_change = any(change["category"] in risky_categories for change in changes)
     test_gap = has_risky_change and test_changes["non_deleted"] == 0
@@ -809,6 +909,73 @@ def render_markdown(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def review_context_questions(summary: dict) -> list[str]:
+    questions = []
+    if not summary["changed_files"]:
+        questions.append("当前审查范围未识别到变更文件，需要确认 base/head 或 --files 参数是否正确。")
+    if summary["test_gap"]:
+        questions.append("源码或高风险文件已变更但未触及可保留的测试，需要确认验证覆盖。")
+    if "dependencies" in summary["risk_tags"] or "build-toolchain" in summary["risk_tags"]:
+        questions.append("依赖或构建工具链变化是否需要补充安装、构建或锁文件一致性验证。")
+    if "security-sensitive" in summary["risk_tags"]:
+        questions.append("权限、输入校验、凭据或会话处理是否需要安全边界复查。")
+    return questions
+
+
+def build_review_context(summary: dict) -> dict:
+    return {
+        "package_type": "review-context",
+        "repo_path": summary["repo_path"],
+        "scope": summary,
+        "findings": {
+            "generated": False,
+            "items": [],
+            "note": "review-context 只收敛审查范围；有证据的 findings 必须来自后续阅读 diff 和代码。",
+        },
+        "review_focus": summary["review_focus"],
+        "risk_tags": summary["risk_tags"],
+        "test_gap": summary["test_gap"],
+        "needs_confirmation": review_context_questions(summary),
+        "next_steps": [
+            "读取高改动文件和相关调用方上下文。",
+            "只在有明确证据时输出 findings。",
+            "核对受影响范围内的验证命令，不把候选命令当作已执行结果。",
+        ],
+    }
+
+
+def render_review_context_markdown(context: dict) -> str:
+    scope = context["scope"]
+    lines = [
+        f"仓库路径：{context['repo_path']}",
+        "执行包类型：review-context",
+        f"范围来源：{scope['scope_source']}",
+        f"变更文件数：{len(scope['changed_files'])}",
+        f"风险标签：{', '.join(context['risk_tags']) or '未识别'}",
+        f"测试缺口：{'是' if context['test_gap'] else '否'}",
+        "Findings 状态：未生成；该入口只收敛审查上下文，不伪造发现项。",
+        "Review 焦点：",
+    ]
+    for item in context["review_focus"]:
+        lines.append(f"- {item}")
+    lines.append("高改动文件：")
+    if scope["hottest_files"]:
+        for item in scope["hottest_files"]:
+            lines.append(f"- {item['path']} [{item['status']}] +{item['additions']} -{item['deletions']}")
+    else:
+        lines.append("- 未识别")
+    lines.append("待确认：")
+    if context["needs_confirmation"]:
+        for item in context["needs_confirmation"]:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- 当前未识别到必须补问的阻塞项。")
+    lines.append("下一步：")
+    for item in context["next_steps"]:
+        lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
 def prepare_summary_for_output(summary: dict) -> dict:
     payload = dict(summary)
     payload["repo_path"] = format_path_for_output(summary["repo_path"])
@@ -823,23 +990,61 @@ def prepare_summary_for_output(summary: dict) -> dict:
     return payload
 
 
+def build_error_envelope(repo: Path, error: GitCommandError) -> dict:
+    return {
+        "ok": False,
+        "repo_path": format_path_for_output(str(repo.resolve())),
+        "error": error.to_dict(),
+    }
+
+
+def render_error_markdown(envelope: dict) -> str:
+    error = envelope["error"]
+    lines = [
+        f"仓库路径：{envelope['repo_path']}",
+        "状态：失败",
+        f"错误类型：{error['type']}",
+        f"错误原因：{error['message']}",
+        f"命令：{' '.join(error['command'])}",
+    ]
+    if error.get("stderr"):
+        lines.append(f"stderr：{error['stderr'].strip()}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     args = parse_args()
     repo = Path(args.repo).resolve()
     if not repo.exists():
         raise SystemExit(f"Repository path does not exist: {repo}")
 
-    detected_git_root = git_root(repo)
-    if args.files:
-        changes, scope_source = collect_explicit_files(repo, args.files)
-    elif detected_git_root is not None:
-        repo = detected_git_root
-        changes, scope_source = collect_git_changes(repo, args.base, args.head)
-    else:
-        raise SystemExit("No git repository detected and no --files were provided.")
+    try:
+        detected_git_root = git_root(repo)
+        if args.files:
+            changes, scope_source = collect_explicit_files(repo, args.files)
+        elif detected_git_root is not None:
+            repo = detected_git_root
+            changes, scope_source = collect_git_changes(repo, args.base, args.head)
+        else:
+            raise SystemExit("No git repository detected and no --files were provided.")
+    except GitCommandError as error:
+        envelope = build_error_envelope(repo, error)
+        if args.format == "json":
+            print(json.dumps(envelope, ensure_ascii=False, indent=2))
+        else:
+            print(render_error_markdown(envelope), file=sys.stderr)
+        return 1
 
     summary = build_summary(repo, changes, scope_source)
     output_summary = prepare_summary_for_output(summary)
+    if args.context:
+        context = build_review_context(output_summary)
+        if args.format == "json":
+            print(json.dumps(context, ensure_ascii=False, indent=2))
+        else:
+            print(render_review_context_markdown(context))
+        return 0
+
     if args.format == "json":
         print(json.dumps(output_summary, ensure_ascii=False, indent=2))
     else:

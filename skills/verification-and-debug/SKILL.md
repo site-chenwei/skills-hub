@@ -35,6 +35,7 @@ description: Use this skill for build failures, failing tests, runtime bugs, reg
 
 1. 先捕获失败上下文。
    - 可复现时优先执行 `<python_cmd> <skill_root>/run.py capture_failure --cwd <repo> -- <cmd>`
+   - 也可使用高层别名 `<python_cmd> <skill_root>/run.py check ...` 或 `triage ...`，二者等价于 `capture_failure`。
    - 先拿到退出码、stdout/stderr 尾部、初步分类和下一步建议。
 2. 稳定复现并判断故障层级。
    - 先判断问题位于构建、测试、运行时、配置、依赖、网络、权限还是外部系统。

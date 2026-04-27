@@ -32,6 +32,7 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 1. 先生成变更简报。
    - 优先执行 `<python_cmd> <skill_root>/run.py change_plan --repo <repo> --paths <paths...> [flags]`
    - 用它先判断走 light 还是 full 模式，并拿到阶段、验证要求和建议串联的 skill。
+   - 当需要先交付任务执行包而不是直接实现时，执行 `<python_cmd> <skill_root>/run.py task-intake --repo <repo> --goal <goal> --paths <paths...> [flags]`；该入口会组合项目事实、变更计划、验证候选、风险和待确认项，但不会执行实现或验证命令。
 2. 研究与分析
    - 检查目标、预期结果、边界范围、约束条件，并确认项目事实入口与验证路径。
 3. 方案构思

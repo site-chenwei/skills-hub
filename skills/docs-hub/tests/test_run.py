@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -66,6 +67,12 @@ class DocsHubRunnerTests(unittest.TestCase):
         )
         return hub_root
 
+    def write_doc(self, hub_root: Path, rel_path: str, content: str, docset: str = "testset") -> Path:
+        path = hub_root / "docs" / docset / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
+        return path
+
     def test_runner_init_injects_skill_root_and_search_lists_docsets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             isolated_skill_root = Path(temp_dir) / "docs-hub"
@@ -85,7 +92,7 @@ class DocsHubRunnerTests(unittest.TestCase):
 
             self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
             state = json.loads(self.runtime_path(".skill-init.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["skill_root"], str(isolated_skill_root))
+            self.assertEqual(state["skill_root"], str(isolated_skill_root.resolve()))
 
             search_proc = subprocess.run(
                 [sys.executable, str(runner_path), "search", "--hub-root", str(hub_root), "--list-docsets", "--json"],
@@ -97,8 +104,31 @@ class DocsHubRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(search_proc.returncode, 0, search_proc.stderr)
-            self.assertIn("testset", search_proc.stdout)
-            self.assertIn("[indexed]", search_proc.stdout)
+            payload = json.loads(search_proc.stdout)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(["testset"], [item["id"] for item in payload["docsets"]])
+            self.assertEqual("indexed", payload["docsets"][0]["status"])
+
+    def test_runner_init_accepts_positional_hub_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+            hub_root = self.make_hub()
+
+            init_proc = subprocess.run(
+                [sys.executable, str(runner_path), "init", str(hub_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+            state = json.loads(self.runtime_path(".skill-init.json").read_text(encoding="utf-8"))
+            self.assertEqual(str(hub_root.resolve()), state["hub_root"])
 
     def test_fresh_skill_copy_reuses_external_runtime_after_init(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -133,8 +163,155 @@ class DocsHubRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(search_proc.returncode, 0, search_proc.stderr)
-            self.assertIn("testset", search_proc.stdout)
-            self.assertIn("[indexed]", search_proc.stdout)
+            payload = json.loads(search_proc.stdout)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(["testset"], [item["id"] for item in payload["docsets"]])
+            self.assertEqual("indexed", payload["docsets"][0]["status"])
+
+    def test_runner_lookup_outputs_json_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+            hub_root = self.make_hub()
+            self.write_doc(
+                hub_root,
+                "lookup.md",
+                """
+                ---
+                title: "lookup doc"
+                source_url: "https://example.com/lookup"
+                menu_path:
+                  - "指南"
+                ---
+
+                # lookup doc
+
+                lookupsentinel
+                """,
+            )
+
+            init_proc = subprocess.run(
+                [sys.executable, str(runner_path), "init", "--hub-root", str(hub_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+            self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+
+            lookup_proc = subprocess.run(
+                [sys.executable, str(runner_path), "lookup", "--hub-root", str(hub_root), "lookupsentinel", "--docset", "testset"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(lookup_proc.returncode, 0, lookup_proc.stderr)
+            payload = json.loads(lookup_proc.stdout)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(["lookup.md"], [row["rel_path"] for row in payload["results"]])
+
+    def test_runner_lookup_outputs_json_envelope_when_uninitialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+
+            lookup_proc = subprocess.run(
+                [sys.executable, str(runner_path), "lookup", "missinginit"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertNotEqual(0, lookup_proc.returncode)
+            payload = json.loads(lookup_proc.stdout)
+            self.assertFalse(payload["ok"], payload)
+            self.assertTrue(payload["failed"], payload)
+            self.assertEqual([], payload["results"])
+            self.assertEqual("lookup_failed", payload["failed_docsets"][0]["reason"])
+            self.assertIn("尚未初始化", payload["failed_docsets"][0]["message"])
+
+    def test_runner_unknown_command_exits_2_without_searching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+
+            proc = subprocess.run(
+                [sys.executable, str(runner_path), "not-a-command"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(2, proc.returncode)
+            self.assertIn("unknown command: not-a-command", proc.stderr)
+            self.assertNotIn("尚未初始化", proc.stderr)
+
+    def test_runner_reinit_defaults_to_all_and_accepts_positional_hub_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+            hub_root = self.make_hub()
+            cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+            cfg["docsets"].append({"id": "extraset", "name": "Extra", "root": "docs/extraset"})
+            (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.write_doc(
+                hub_root,
+                "extra.md",
+                """
+                ---
+                title: "extra doc"
+                source_url: "https://example.com/extra"
+                menu_path:
+                  - "指南"
+                ---
+
+                # extra doc
+
+                extrasentinel
+                """,
+                docset="extraset",
+            )
+
+            init_proc = subprocess.run(
+                [sys.executable, str(runner_path), "init", "--hub-root", str(hub_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+            self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+            (hub_root / "index" / "testset.sqlite").unlink()
+            (hub_root / "index" / "extraset.sqlite").unlink()
+
+            reinit_proc = subprocess.run(
+                [sys.executable, str(runner_path), "reinit", str(hub_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(reinit_proc.returncode, 0, reinit_proc.stderr)
+            self.assertTrue((hub_root / "index" / "testset.sqlite").exists())
+            self.assertTrue((hub_root / "index" / "extraset.sqlite").exists())
 
 
 if __name__ == "__main__":
