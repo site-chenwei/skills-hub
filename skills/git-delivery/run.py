@@ -8,13 +8,19 @@ from pathlib import Path
 
 
 SKILL_ROOT = Path(__file__).resolve().parent
+SCRIPT_PATH = SKILL_ROOT / "scripts" / "delivery_scope.py"
 COMMANDS = {
-    "delivery-scope": (SKILL_ROOT / "scripts" / "delivery_scope.py", []),
+    "delivery-scope": (SCRIPT_PATH, []),
+    "preflight": (SCRIPT_PATH, ["--mode", "preflight"]),
+    "stage-plan": (SCRIPT_PATH, ["--mode", "stage-plan"]),
+    "commit-plan": (SCRIPT_PATH, ["--mode", "commit-plan"]),
+    "post-push-check": (SCRIPT_PATH, ["--mode", "post-push-check"]),
 }
 
 
 def print_usage() -> None:
-    print("usage: run.py {delivery-scope} [args...]", file=sys.stderr)
+    commands = "|".join(COMMANDS)
+    print(f"usage: run.py {{{commands}}} [args...]", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

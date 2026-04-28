@@ -20,6 +20,11 @@ class RunTests(unittest.TestCase):
     def test_unknown_command_returns_usage_error(self) -> None:
         self.assertEqual(MODULE.main(["unknown"]), 2)
 
+    def test_planning_commands_are_registered(self) -> None:
+        for command in ("preflight", "stage-plan", "commit-plan", "post-push-check"):
+            with self.subTest(command=command):
+                self.assertIn(command, MODULE.COMMANDS)
+
     def test_agent_metadata_uses_declared_skill_name(self) -> None:
         text = AGENT_METADATA_PATH.read_text(encoding="utf-8")
 
