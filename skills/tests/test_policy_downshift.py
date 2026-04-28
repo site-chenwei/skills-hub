@@ -8,8 +8,10 @@ SKILL_ROOT = REPO_ROOT / "skills"
 SKILL_NAMES = [
     "code-review-checklist",
     "docs-hub",
+    "git-delivery",
     "harmony-build",
     "project-onboarding",
+    "skill-repo-lifecycle",
     "structured-dev",
     "verification-and-debug",
 ]
@@ -21,6 +23,10 @@ def read_skill(name: str) -> str:
 
 def read_agent_metadata(name: str) -> str:
     return (SKILL_ROOT / name / "agents" / "openai.yaml").read_text(encoding="utf-8")
+
+
+def read_reference(name: str, reference: str) -> str:
+    return (SKILL_ROOT / name / "references" / reference).read_text(encoding="utf-8")
 
 
 class PolicyDownshiftTests(unittest.TestCase):
@@ -73,6 +79,30 @@ class PolicyDownshiftTests(unittest.TestCase):
         docs = read_skill("docs-hub")
         self.assertIn("do not silently degrade", docs)
         self.assertIn("fabricated sources", docs)
+
+        git_delivery = read_skill("git-delivery")
+        self.assertIn("git diff --check", git_delivery)
+        self.assertIn("凭据", git_delivery)
+
+        lifecycle = read_skill("skill-repo-lifecycle")
+        self.assertIn("skills.test_all_skills", lifecycle)
+        self.assertIn("/Users/bill/.cc-switch/skills", lifecycle)
+
+    def test_reference_extensions_cover_history_driven_gaps(self) -> None:
+        structured = read_skill("structured-dev")
+        docs = read_skill("docs-hub")
+
+        self.assertIn("references/reference-porting.md", structured)
+        self.assertIn("references/content-publishing.md", docs)
+
+    def test_skill_composition_covers_delivery_and_lifecycle(self) -> None:
+        composition = read_reference("structured-dev", "skill-composition.md")
+        structured_metadata = read_agent_metadata("structured-dev")
+
+        self.assertIn("`git-delivery`", composition)
+        self.assertIn("`skill-repo-lifecycle`", composition)
+        self.assertIn("$git-delivery", structured_metadata)
+        self.assertIn("$skill-repo-lifecycle", structured_metadata)
 
 
 if __name__ == "__main__":

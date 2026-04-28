@@ -53,7 +53,8 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 - 验证强度按主要风险选择，优先静态检查、单测、脚本回归或手工最小路径；只有用户要求、改动进入构建链路、便宜验证不足或已命中高风险条件时，才升级到模块级或整体构建。
 - 不因项目类型或“补验证”机械触发编译；HarmonyOS / OpenHarmony 页面结构、导航、`@Entry`、`HdsNavigation` / `HdsNavDestination` / `HdsTabs`、`NavigationBuilderRegister`、`build()` 根节点、`@Builder` / `@BuilderParam`、公共页面脚手架或资源接线变更，才倾向补模块级 hvigor 验证。
 - 同一问题连续多次修改仍未解决时，要回退并换路径，不连续叠加猜修。
-- 在边界不清时，优先串联 `project-onboarding`；在 bugfix/失败修复任务里，优先串联 `verification-and-debug`；交付前需要独立复查时，串联 `code-review-checklist`。
+- 当用户要求“按上游实现”“照抄核心算法/数据结构”“参考某个开源项目实现”时，先读取 [references/reference-porting.md](references/reference-porting.md)，把上游边界、热路径、数据结构和本地差异列清楚，再进入实现。
+- 在边界不清时，优先串联 `project-onboarding`；在 bugfix/失败修复任务里，优先串联 `verification-and-debug`；交付前需要独立复查时，串联 `code-review-checklist`；需要 stage/commit/push 时串联 `git-delivery`；维护 repo-owned Skill 或安装副本时串联 `skill-repo-lifecycle`。
 
 ## 不要这样做
 
@@ -66,3 +67,4 @@ description: Use this skill for new features, refactors, multi-file or high-risk
 
 - 需要更具体的启用判断或输出模板时，读取 [references/workflow-decision.md](references/workflow-decision.md)。
 - 需要判断什么时候串联其他 skill 时，读取 [references/skill-composition.md](references/skill-composition.md)。
+- 需要按上游或参考实现迁移核心逻辑时，读取 [references/reference-porting.md](references/reference-porting.md)。

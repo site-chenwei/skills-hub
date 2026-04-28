@@ -44,6 +44,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - The user wants to search a local markdown documentation hub instead of browsing online.
 - The target is a DocsHub-style repository with `docsets.json`, `docs/`, optional `index/`, and markdown content.
 - The user wants to refresh or rebuild a local docs index.
+- The user wants to add, publish, validate, or commit content in a DocsHub-style documentation repository.
 - The user explicitly invokes `$docs-hub`.
 - The user wants to check DocsHub health or why lookup/search did not return expected local evidence.
 - You need to look up documentation, API facts, guides, FAQ entries, best practices, error codes, SDK references, or other factual material before answering, even if the user did not explicitly say “查本地文档”.
@@ -112,6 +113,15 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - JSON status output includes `initialized`, `hub_root`, `docsets`, `healthy_docsets`, and `failed_docsets`.
 - Treat non-empty `failed_docsets` as a setup/index problem, not as evidence that the documentation has no answer.
 
+## Content Publishing
+
+- Use this path when the repository itself is a DocsHub content repo, not an application code repo.
+- Validate `docsets.json` with a JSON parser and confirm every new docset root stays under the hub `docs/` tree.
+- For Markdown snapshots, run `git diff --check` before committing to catch trailing whitespace and missing final newlines.
+- Scan staged or candidate files for obvious secrets, tokens, `.env` fragments, and accidental local diagnostics before publishing.
+- Do not invent a non-existent build or test suite for a pure content repo; use `docsets.json` parsing, Markdown hygiene, index/search smoke, and Git status as the validation chain.
+- If a new docset should be searchable immediately, run `reinit --hub-root <hub_root> --docset <id>` or a query-scoped refresh only when the user asked for indexing/publishing, then verify with `lookup`.
+
 ## Answering rules
 
 - Prefer local evidence over memory, and do not skip the local DocsHub lookup when it could plausibly answer the question.
@@ -123,3 +133,4 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 ## References
 
 - If you need the expected hub layout or CLI semantics, read `references/hub-layout.md`.
+- If you need the DocsHub content publishing checklist, read `references/content-publishing.md`.

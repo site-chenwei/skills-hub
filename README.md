@@ -6,7 +6,9 @@
 
 - `harmony-build`
 - `docs-hub`
+- `git-delivery`
 - `project-onboarding`
+- `skill-repo-lifecycle`
 - `structured-dev`
 - `code-review-checklist`
 - `verification-and-debug`
@@ -19,6 +21,8 @@
 - `verification-and-debug`：支持失败命令捕获，统一记录退出码、日志尾部和故障分类
 - `harmony-build`：支持 macOS Harmony 构建环境探测、缓存基线和 hvigor 验证
 - `docs-hub`：支持外部 DocsHub 根目录初始化、本地索引构建与文档检索；Skill bundle 本身不携带文档快照
+- `git-delivery`：支持 Git 交付范围扫描，提示系统文件、诊断日志、凭据风险、diff 检查和远端同步状态
+- `skill-repo-lifecycle`：支持 repo-owned Skill 清单、聚合测试、安装目录一致性和用户级 AGENTS 下沉边界检查
 
 ## 仓库布局
 
