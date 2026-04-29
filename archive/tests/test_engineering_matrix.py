@@ -18,10 +18,10 @@ def load_script(module_name: str, relative_path: str):
     return module
 
 
-PROJECT_FACTS = load_script("matrix_project_facts", "skills/project-onboarding/scripts/project_facts.py")
-CHANGE_PLAN = load_script("matrix_change_plan", "skills/structured-dev/scripts/change_plan.py")
-REVIEW_SCOPE = load_script("matrix_review_scope", "skills/code-review-checklist/scripts/review_scope.py")
-CAPTURE_FAILURE = load_script("matrix_capture_failure", "skills/verification-and-debug/scripts/capture_failure.py")
+PROJECT_FACTS = load_script("matrix_project_facts", "archive/skills/project-onboarding/scripts/project_facts.py")
+CHANGE_PLAN = load_script("matrix_change_plan", "archive/skills/structured-dev/scripts/change_plan.py")
+REVIEW_SCOPE = load_script("matrix_review_scope", "archive/skills/code-review-checklist/scripts/review_scope.py")
+CAPTURE_FAILURE = load_script("matrix_capture_failure", "archive/skills/verification-and-debug/scripts/capture_failure.py")
 HARMONY_BUILD = load_script("matrix_harmony_build", "skills/harmony-build/scripts/harmony_build.py")
 
 

@@ -2,31 +2,31 @@
 
 个人通用 Skill 仓库，统一存放可复用的 `SKILL.md` 工作流、检查清单和配套辅助脚本。
 
-## 当前 Skill
+## 当前 Active Skill
 
-- `harmony-build`
 - `docs-hub`
+- `harmony-build`
+- `skill-repo-lifecycle`
+
+## Active 能力形态
+
+- `docs-hub`：支持外部 DocsHub 根目录初始化、本地索引构建与文档检索；Skill bundle 本身不携带文档快照
+- `harmony-build`：支持 macOS Harmony 构建环境探测、缓存基线和 hvigor 验证
+- `skill-repo-lifecycle`：支持 repo-owned active/archive Skill 清单、聚合测试、安装目录一致性、归档残留检查和用户级 AGENTS 下沉边界检查
+
+## 已归档 Skill
+
+以下 Skill 已移至 `archive/skills/`，不再作为 active Skill 安装、触发、同步到运行态目录或参与主聚合测试；代码仅作为历史参考保留。
+
+- `code-review-checklist`
 - `git-delivery`
 - `project-onboarding`
-- `skill-repo-lifecycle`
 - `structured-dev`
-- `code-review-checklist`
 - `verification-and-debug`
-
-## 新增能力形态
-
-- `project-onboarding`：支持仓库事实扫描，自动抽取文档入口、技术栈信号和验证命令候选
-- `structured-dev`：支持变更简报生成，按路径和风险信号给出 light / full 工作流
-- `code-review-checklist`：支持变更范围分析，输出文件分类、风险标签和测试缺口
-- `verification-and-debug`：支持失败命令捕获，统一记录退出码、日志尾部和故障分类
-- `harmony-build`：支持 macOS Harmony 构建环境探测、缓存基线和 hvigor 验证
-- `docs-hub`：支持外部 DocsHub 根目录初始化、本地索引构建与文档检索；Skill bundle 本身不携带文档快照
-- `git-delivery`：支持 Git 交付范围扫描，提示系统文件、诊断日志、凭据风险、diff 检查和远端同步状态
-- `skill-repo-lifecycle`：支持 repo-owned Skill 清单、聚合测试、安装目录一致性和用户级 AGENTS 下沉边界检查
 
 ## 仓库布局
 
-所有 Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 Skill 根目录暴露统一的 `run.py` 入口。调用时先取当前已打开 `SKILL.md` 的所在目录作为 `<skill_root>`，再执行 `<python_cmd> <skill_root>/run.py ...`，不要手拼 `scripts/*.py` 的安装绝对路径。其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
+Active Skill 均位于 `skills/` 目录下；需要 deterministic 能力时，优先把脚本放进各自 Skill 的 `scripts/`，并在 Skill 根目录暴露统一的 `run.py` 入口。调用时先取当前已打开 `SKILL.md` 的所在目录作为 `<skill_root>`，再执行 `<python_cmd> <skill_root>/run.py ...`，不要手拼 `scripts/*.py` 的安装绝对路径。其中 `<python_cmd>` 表示当前环境可用的 Python 启动命令：Windows / PowerShell 优先 `py -3`，其次 `python`，最后 `python3`；类 Unix 环境优先 `python3`，其次 `python`。
 
 每个 Skill 的 `SKILL.md` 必须独立写清运行约定：仓库源码布局不代表运行时安装路径，`<skill_root>` 只能由本次实际打开的入口文件推导；查找 `run.py`、`scripts/`、`references/`、模板或其他附件前，必须先基于该根目录显式确认目标存在；路径不一致或附件缺失时，报告问题并回退手工流程，不根据同名目录、`.system`、`builtin`、`installed` 等目录习惯猜测替代路径。
 

@@ -34,6 +34,8 @@ class LifecycleScopeTests(unittest.TestCase):
             summary = MODULE.collect_summary(repo, install)
 
         self.assertEqual(summary["skill_count"], 1)
+        self.assertEqual(summary["active_skill_count"], 1)
+        self.assertEqual(summary["archived_skill_count"], 0)
         self.assertEqual(summary["skills"][0]["name"], "sample-skill")
         self.assertTrue(summary["skills"][0]["install_matches_source"])
         self.assertEqual(summary["recommended_validation"], "python3 -m unittest skills.test_all_skills")
@@ -66,6 +68,52 @@ class LifecycleScopeTests(unittest.TestCase):
             summary = MODULE.collect_summary(repo, install)
 
         self.assertIn(f"sample-skill: installed copy missing at {install / 'sample-skill'}", summary["attention"])
+
+    def test_archived_skill_install_residual_is_attention_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            install = Path(temp_dir) / "install"
+            archived = repo / "archive" / "skills" / "old-skill"
+            installed = install / "old-skill"
+            archived.mkdir(parents=True)
+            installed.mkdir(parents=True)
+            (archived / "SKILL.md").write_text("---\nname: old-skill\ndescription: old\n---\n", encoding="utf-8")
+            (installed / "SKILL.md").write_text("---\nname: old-skill\ndescription: old\n---\n", encoding="utf-8")
+
+            summary = MODULE.collect_summary(repo, install)
+
+        self.assertEqual(summary["archived_skill_count"], 1)
+        self.assertEqual(summary["archived_skills"][0]["name"], "old-skill")
+        self.assertTrue(summary["archived_skills"][0]["installed"])
+        self.assertIn(f"old-skill: archived skill still installed at {install / 'old-skill'}", summary["attention"])
+
+    def test_markdown_output_reports_active_and_archived_sections(self) -> None:
+        summary = {
+            "repo": "/tmp/repo",
+            "install_root": "/tmp/install",
+            "active_skill_count": 1,
+            "archived_skill_count": 1,
+            "recommended_validation": "python3 -m unittest skills.test_all_skills",
+            "shared_tests": True,
+            "skills": [
+                {
+                    "name": "current-skill",
+                    "has_run_py": True,
+                    "has_tests": True,
+                    "installed": True,
+                    "install_matches_source": True,
+                }
+            ],
+            "archived_skills": [{"name": "old-skill", "installed": True}],
+            "attention": ["old-skill: archived skill still installed at /tmp/install/old-skill"],
+        }
+
+        text = MODULE.format_markdown(summary)
+
+        self.assertIn("Active Skill 清单：", text)
+        self.assertIn("- current-skill (run.py, tests, installed, parity)", text)
+        self.assertIn("归档 Skill 清单：", text)
+        self.assertIn("- old-skill (installed-residual)", text)
 
 
 if __name__ == "__main__":

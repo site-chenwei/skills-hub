@@ -8,14 +8,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_ROOT = REPO_ROOT / "skills"
 
 SKILL_NAMES = [
-    "code-review-checklist",
     "docs-hub",
-    "git-delivery",
     "harmony-build",
-    "project-onboarding",
     "skill-repo-lifecycle",
-    "structured-dev",
-    "verification-and-debug",
 ]
 
 

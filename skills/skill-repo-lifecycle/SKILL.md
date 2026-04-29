@@ -5,7 +5,7 @@ description: "Use when maintaining a repository of Codex skills, especially skil
 
 # Skill 仓库生命周期
 
-用于维护本仓库这类 repo-owned Skill 集合：确认 Skill 边界、补齐脚本和测试、维护用户级 AGENTS 下沉边界，并把源码态变更同步到运行态安装副本。
+用于维护本仓库这类 repo-owned Skill 集合：确认 active/archive Skill 边界、补齐脚本和测试、维护用户级 AGENTS 下沉边界，并把源码态变更同步到运行态安装副本。
 
 ## 运行约定
 
@@ -20,7 +20,8 @@ description: "Use when maintaining a repository of Codex skills, especially skil
 
 1. 先扫描 Skill 仓库事实。
    - 优先执行 `<python_cmd> <skill_root>/run.py lifecycle-scope --repo <repo> --format markdown`
-   - 确认 `skills/*/SKILL.md` 清单、每个 Skill 的 `run.py`、`agents/openai.yaml`、测试目录、参考资料和脚本目录状态。
+   - 确认 `skills/*/SKILL.md` active 清单、`archive/skills/*/SKILL.md` 归档清单、每个 active Skill 的 `run.py`、`agents/openai.yaml`、测试目录、参考资料和脚本目录状态。
+   - 如果归档 Skill 仍残留在安装目录，先报告为 hygiene 风险；不要把 archived code 当作 active 能力继续同步。
 2. 维护 Skill 内容。
    - 新增 Skill 时保持 `SKILL.md`、`agents/openai.yaml`、`run.py`、必要 `scripts/` 或 `references/`、以及单测一起落地。
    - 更新 `SKILL.md` 的触发描述后，检查 `agents/openai.yaml` 是否仍匹配。
@@ -42,8 +43,8 @@ description: "Use when maintaining a repository of Codex skills, especially skil
 ## 入口脚本
 
 - `<skill_root>/run.py lifecycle-scope`
-  - 输出 repo-owned Skill 清单、缺失附件、聚合测试入口、安装目录状态和源码/安装副本一致性提示。
-  - 对源码存在但安装副本缺失、安装副本与源码不一致、`run.py` 缺少测试覆盖等情况输出 attention。
+  - 输出 repo-owned active Skill 清单、归档 Skill 清单、缺失附件、聚合测试入口、安装目录状态和源码/安装副本一致性提示。
+  - 对 active 源码存在但安装副本缺失、安装副本与源码不一致、`run.py` 缺少测试覆盖、归档 Skill 仍残留安装目录等情况输出 attention。
   - 支持 `--install-root <path>` 和 `--format markdown|json`。
 
 ## 参考
