@@ -32,6 +32,8 @@ Use this skill as the default retrieval gateway for documentation and factual/re
   Search the DocsHub and answer from the matched local files.
 - `$docs-hub lookup <query>`
   Agent-oriented search. It returns JSON with `ok`, `partial`, `failed`, `results`, and `failed_docsets`.
+- `$docs-hub catalog [--docset <id>] [--json]` / `$docs-hub list [--json]`
+  Output the concise agent-facing catalog: what each docset is suitable for, its topics, source sets, recommended queries, and index counts. This is a discovery aid only; use `lookup` to open source documents for evidence.
 - `$docs-hub refresh <query>`
   Refresh the relevant local index first, then search.
 - `$docs-hub reinit [hub-root] [--docset <id>]`
@@ -86,6 +88,7 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - Runtime directory convention follows `skills-hub/<skill-name>` under the user cache root; use `SKILLS_HUB_RUNTIME_DIR` to override the shared root.
 - Query and rebuild prefer the DocsHub root recorded during the last successful init.
 - Explicit `init <hub-root>` is strict: it validates only that directory and does not fall back to env or workspace discovery.
+- `init`, `reinit`, and `refresh` update `index/catalog.json` after index changes. During index-building commands, direct child directories under `<hub-root>/docs/` that are not listed in `docsets.json` are appended as minimal auto-discovered docsets and then indexed.
 - If any bundled script says the skill is not initialized during a normal search, tell the user to run `$docs-hub init` in Codex instead of showing raw shell commands first.
 - Do not auto-install dependencies during search/build.
 
@@ -112,6 +115,13 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 - Use status/doctor for quick health checks only; these commands do not install dependencies, refresh indexes, or rebuild docsets.
 - JSON status output includes `initialized`, `hub_root`, `docsets`, `healthy_docsets`, and `failed_docsets`.
 - Treat non-empty `failed_docsets` as a setup/index problem, not as evidence that the documentation has no answer.
+
+## Catalog
+
+- Use `$docs-hub catalog --json` when an agent first needs to discover what local docsets can answer.
+- Keep catalog data concise. `docsets.json` may define short optional fields: `description`, `topics`, `recommended_queries`, `source_sets`, and `catalog_file`.
+- `index/catalog.json` is generated data. Do not paste it wholesale into the conversation; use it to choose a targeted `lookup` query.
+- If a `lookup` returns no results and the docset is healthy, inspect `catalog_hints` for recommended follow-up query terms.
 
 ## Content Publishing
 

@@ -15,7 +15,7 @@ REINIT_SCRIPT = SKILL_ROOT / "scripts" / "build_docset_index.py"
 
 
 def print_usage() -> None:
-    print("usage: run.py {init,search,lookup,refresh,reinit,status,doctor} [args...]", file=sys.stderr)
+    print("usage: run.py {init,search,lookup,catalog,list,refresh,reinit,status,doctor} [args...]", file=sys.stderr)
 
 
 def print_unknown_command(command: str) -> None:
@@ -73,6 +73,8 @@ def build_command(args: list[str]) -> list[str] | None:
         if not has_option(forwarded, "--json"):
             forwarded = ["--json", *forwarded]
         return [sys.executable, str(SEARCH_SCRIPT), *forwarded]
+    if command in {"catalog", "list"}:
+        return [sys.executable, str(SEARCH_SCRIPT), "--catalog", *forwarded]
     if command == "refresh":
         return [sys.executable, str(SEARCH_SCRIPT), "--rebuild-stale", *forwarded]
     if command == "reinit":

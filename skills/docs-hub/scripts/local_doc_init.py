@@ -29,6 +29,7 @@ from _bootstrap import (  # noqa: E402
     skill_root,
     write_json_atomic,
 )
+from catalog import catalog_path, discover_missing_docsets, update_catalog  # noqa: E402
 
 
 def deps_site_packages(root: Path) -> Path:
@@ -193,6 +194,10 @@ def main() -> None:
         site_packages, installer = install_requirements_atomic(runtime_dir, req_path)
     activate_site_packages(site_packages)
 
+    discovered = discover_missing_docsets(hub_root)
+    if discovered:
+        print("[init] 自动发现 docset: " + ", ".join(str(item["id"]) for item in discovered))
+
     state = {
         "initialized_at": datetime.now(timezone.utc).isoformat(),
         "skill_root": str(root),
@@ -212,6 +217,8 @@ def main() -> None:
     build_module = load_build_module()
     defaults, actions = detect_index_actions(hub_root, build_module)
     build_required_indexes(hub_root, defaults, actions, build_module)
+    update_catalog(hub_root)
+    print(f"[init] 已更新资料目录: {catalog_path(hub_root)}")
     state_path = init_state_path(root)
     write_json_atomic(state_path, state)
     print(f"[init] 完成: {state_path}")

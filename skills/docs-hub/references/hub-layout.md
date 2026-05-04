@@ -36,11 +36,22 @@ Minimal shape:
     {
       "id": "example",
       "name": "Example Docs",
-      "root": "docs/example"
+      "root": "docs/example",
+      "description": "短句说明这个 docset 适合回答的问题类型",
+      "topics": ["API", "FAQ", "best practices"],
+      "recommended_queries": ["Example API auth", "Example FAQ"],
+      "source_sets": [
+        {"id": "official-docs", "description": "官方原文快照"},
+        {"id": "engineering-notes", "description": "工程摘要或本地笔记"}
+      ],
+      "catalog_file": "docs/example/DOCSET.md"
     }
   ]
 }
 ```
+
+Catalog fields are optional and intentionally short. They are for agent discovery
+only; the source Markdown files remain the evidence used in final answers.
 
 ## Commands
 
@@ -51,6 +62,7 @@ Read-only search:
 ```bash
 <python_cmd> <skill_root>/run.py search --hub-root <hub_root> 输入法 --top 8
 <python_cmd> <skill_root>/run.py search --hub-root <hub_root> 光标 跟随 --match all --docset harmonyos --top 5
+<python_cmd> <skill_root>/run.py catalog --hub-root <hub_root> --json
 ```
 
 Refresh only on explicit user request:
@@ -66,6 +78,8 @@ Refresh only on explicit user request:
 - The skill keeps its runtime `.deps/` and init state in a user-local cache directory outside the synced skill bundle; do not write initialization state into the external hub.
 - By default that runtime directory follows the shared `skills-hub/<skill-name>` convention; `SKILLS_HUB_RUNTIME_DIR` overrides the shared root.
 - Running `init` refreshes that local runtime cache and rebuilds indexes that are missing or stale for the current build logic.
+- `init`, `refresh`, and `reinit` refresh `index/catalog.json`, a compact agent-facing discovery file.
+- Index-building commands auto-discover direct child directories under `docs/` that are not already present in `docsets.json`. They append minimal entries with `id`, `name`, `root`, and `auto_discovered`.
 - Dependency installation uses `uv pip install --python <current-python>` when `uv` is available, otherwise `<current-python> -m pip`, so PATH-level `pip3` from another Python is not reused accidentally.
 - A repeated `init` reuses the local runtime dependency cache only when the requirements hash, Python version/interpreter, site-packages directory, and required distributions still match; pass `--refresh-deps` only when you need to force a reinstall.
 - `search`, `refresh`, and `reinit` validate the same init state before activating cached dependencies. If the Python version or dependency cache no longer matches, rerun `$docs-hub init`.

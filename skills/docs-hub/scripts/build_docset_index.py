@@ -48,6 +48,7 @@ from _common import (  # noqa: E402
     sha256_text,
     split_markdown,
 )
+from catalog import catalog_path, discover_missing_docsets, update_catalog  # noqa: E402
 
 
 SCHEMA = """
@@ -586,6 +587,9 @@ def main() -> None:
     if args.hub_root and args.hub_root_pos:
         raise SystemExit("[error] hub root 只能通过位置参数或 --hub-root 指定一次")
     hub_root = resolve_query_hub_root(args.hub_root or args.hub_root_pos, str(state.get("hub_root") or ""))
+    discovered = discover_missing_docsets(hub_root)
+    if discovered:
+        print("[build] 自动发现 docset: " + ", ".join(str(item["id"]) for item in discovered))
     cfg = load_docsets(hub_root)
     defaults = cfg.get("defaults", {})
     docsets = cfg.get("docsets", [])
@@ -601,6 +605,8 @@ def main() -> None:
         except DocsetBuildError as exc:
             raise SystemExit(f"[error] {exc}") from exc
         print(f"  stats: {stats}")
+    update_catalog(hub_root)
+    print(f"[build] 已更新资料目录: {catalog_path(hub_root)}")
 
 
 if __name__ == "__main__":

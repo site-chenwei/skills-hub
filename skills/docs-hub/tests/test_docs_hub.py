@@ -25,6 +25,7 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from _bootstrap import runtime_root  # noqa: E402
 from _common import DependencyMissingError, parse_front_matter  # noqa: E402
 from build_docset_index import compute_build_signature, maybe_vacuum, merge_config  # noqa: E402
+from catalog import load_or_build_catalog  # noqa: E402
 from local_doc_init import install_requirements  # noqa: E402
 from search_docs import expand_keywords_for_fallback, fts_escape, like_escape  # noqa: E402
 
@@ -423,6 +424,79 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         self.assertEqual("testset", payload["failed_docsets"][0]["id"])
         self.assertEqual("missing_index", payload["failed_docsets"][0]["reason"])
 
+    def test_empty_json_search_returns_concise_catalog_hints(self) -> None:
+        hub_root = self.make_hub()
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"][0].update(
+            {
+                "description": "测试资料、Provider 配置与知识库行为",
+                "topics": ["Provider import", "knowledge base", "OpenRouter"],
+                "recommended_queries": ["Provider import", "knowledge base"],
+                "source_sets": [{"id": "official-docs"}, {"id": "engineering-notes"}],
+            }
+        )
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.write_doc(
+            hub_root,
+            "hint-source.md",
+            """
+            ---
+            title: "hint source"
+            source_url: "https://example.com/hint"
+            menu_path:
+              - "指南"
+            ---
+
+            # hint source
+
+            searchablehintsource
+            """,
+        )
+        self.run_build(hub_root)
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "notfoundquery", "--docset", "testset", "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+        payload = json.loads(proc.stdout)
+
+        self.assertEqual([], payload["results"])
+        self.assertEqual(["testset"], payload["searched_docsets"])
+        self.assertEqual(["Provider import", "knowledge base", "OpenRouter"], payload["catalog_hints"][0]["topics"])
+        self.assertEqual(["Provider import", "knowledge base"], payload["catalog_hints"][0]["recommended_queries"])
+
+    def test_catalog_file_outside_hub_root_is_reported_without_path_escape(self) -> None:
+        hub_root = self.make_hub()
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"][0]["catalog_file"] = "../outside.md"
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.write_doc(
+            hub_root,
+            "catalog-safety.md",
+            """
+            ---
+            title: "catalog safety"
+            source_url: "https://example.com/catalog-safety"
+            menu_path:
+              - "指南"
+            ---
+
+            # catalog safety
+
+            catalogsafetysentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        payload = load_or_build_catalog(hub_root)
+        docset = payload["docsets"][0]
+
+        self.assertEqual("", docset["catalog_file"])
+        self.assertIn("越过 hub root 边界", docset["catalog_file_error"])
+
     def test_plain_search_reports_missing_index_without_no_result_message(self) -> None:
         self.ensure_repo_skill_initialized()
         hub_root = self.make_hub()
@@ -495,6 +569,8 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
 
         rows = self.run_search(hub_root, "--rebuild-stale", "updated", "--docset", "testset")
         self.assertEqual(["sub/a.md"], [row["rel_path"] for row in rows])
+        catalog_payload = json.loads((hub_root / "index" / "catalog.json").read_text(encoding="utf-8"))
+        self.assertEqual(["testset"], [item["id"] for item in catalog_payload["docsets"]])
 
     def test_short_tokens_respect_or_semantics(self) -> None:
         hub_root = self.make_hub()

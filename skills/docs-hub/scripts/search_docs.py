@@ -6,6 +6,7 @@
     <python_cmd> run.py search 光标 跟随 --match all --docset harmonyos --top 5
     <python_cmd> run.py search pdd.mall.info.get --docset pinduoduo
     <python_cmd> run.py lookup 输入法 --docset harmonyos
+    <python_cmd> run.py catalog --json
     <python_cmd> run.py status --json
     <python_cmd> run.py refresh 订单 --top 8
 
@@ -37,6 +38,13 @@ from build_docset_index import (  # noqa: E402
     meta_value,
     resolve_docset_root,
     safe_docset_id,
+)
+from catalog import (  # noqa: E402
+    catalog_hints,
+    discover_missing_docsets,
+    load_or_build_catalog,
+    print_catalog,
+    update_catalog,
 )
 
 
@@ -344,6 +352,7 @@ def search_payload(
     results: list[dict[str, Any]],
     failed_docsets: list[dict[str, Any]],
     searched_docsets: list[str],
+    catalog_hints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     partial = bool(failed_docsets) and bool(searched_docsets)
     failed = bool(failed_docsets) and not searched_docsets
@@ -354,6 +363,7 @@ def search_payload(
         "hub_root": hub_root.resolve().as_posix(),
         "searched_docsets": searched_docsets,
         "results": results,
+        "catalog_hints": catalog_hints or [],
         "failed_docsets": failed_docsets,
     }
 
@@ -553,6 +563,45 @@ def print_failed_docsets(failed_docsets: list[dict[str, Any]]) -> None:
             f"[error] failed docset={failure['id']} reason={failure['reason']}: {failure['message']}",
             file=sys.stderr,
         )
+
+
+def make_catalog_failure(message: str) -> dict[str, Any]:
+    return {
+        "id": "",
+        "reason": "catalog_update_failed",
+        "message": message,
+    }
+
+
+def print_catalog_hints(hints: list[dict[str, Any]]) -> None:
+    if not hints:
+        return
+    print("可查主题提示:")
+    for hint in hints:
+        parts: list[str] = []
+        topics = normalize_hint_items(hint.get("topics"), limit=5)
+        queries = normalize_hint_items(hint.get("recommended_queries"), limit=4)
+        if topics:
+            parts.append("主题=" + ", ".join(topics))
+        if queries:
+            parts.append("推荐查询=" + ", ".join(queries))
+        if not parts:
+            continue
+        print(f"- {hint.get('id')}: {'; '.join(parts)}")
+
+
+def normalize_hint_items(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text or text in out:
+            continue
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def ensure_index_ready(
@@ -849,6 +898,7 @@ def main() -> int:
     ap.add_argument("--include-nav", action="store_true")
     ap.add_argument("--rebuild-stale", action="store_true", help="查询前先做一次增量刷新（refresh 模式）")
     ap.add_argument("--list-docsets", action="store_true")
+    ap.add_argument("--catalog", action="store_true", help="输出 agent-facing 资料目录，不返回正文内容")
     ap.add_argument("--status", action="store_true", help="检查初始化、hub root 与索引状态，不触发重建")
     ap.add_argument("--json", action="store_true", help="输出 JSON 而非纯文本")
     ap.add_argument("keywords", nargs="*")
@@ -865,6 +915,38 @@ def main() -> int:
     state = ensure_initialized("查询文档")
     hub_root = resolve_query_hub_root(args.hub_root, str(state.get("hub_root") or ""))
 
+    if args.catalog:
+        payload = load_or_build_catalog(hub_root, write_if_missing=True)
+        if args.docset:
+            filtered_docsets = [d for d in payload.get("docsets", []) if str(d.get("id") or "") == args.docset]
+            if not filtered_docsets:
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                **payload,
+                                "docsets": [],
+                                "failed_docsets": [
+                                    {
+                                        "id": args.docset,
+                                        "reason": "unknown_docset",
+                                        "message": f"未找到 docset: {args.docset}",
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    return 1
+                raise SystemExit(f"未找到 docset: {args.docset}")
+            payload = {**payload, "docsets": filtered_docsets}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print_catalog(payload)
+        return 0
+
     if args.list_docsets:
         if args.json:
             payload = status_payload(str(hub_root))
@@ -878,6 +960,11 @@ def main() -> int:
 
     if not expand_keywords_for_fallback(args.keywords):
         ap.error("关键词清洗后为空")
+
+    if args.rebuild_stale:
+        discovered = discover_missing_docsets(hub_root)
+        if discovered:
+            print("[refresh] 自动发现 docset: " + ", ".join(str(item["id"]) for item in discovered), file=sys.stderr)
 
     cfg = load_docsets(hub_root)
     defaults = cfg.get("defaults", {})
@@ -899,6 +986,7 @@ def main() -> int:
                         results=[],
                         failed_docsets=failed_docsets,
                         searched_docsets=[],
+                        catalog_hints=[],
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -954,6 +1042,16 @@ def main() -> int:
     all_results.sort(key=lambda x: (-int(x.get("matched_terms_count", 0)), x["score"], x["rel_path"]))
     all_results = all_results[: args.top]
 
+    if args.rebuild_stale:
+        try:
+            update_catalog(hub_root)
+        except Exception as exc:  # noqa: BLE001
+            failed_docsets.append(make_catalog_failure(str(exc)))
+
+    hints = []
+    if not all_results and not failed_docsets:
+        hints = catalog_hints(hub_root, searched_docsets)
+
     if args.json:
         print(
             json.dumps(
@@ -962,6 +1060,7 @@ def main() -> int:
                     results=all_results,
                     failed_docsets=failed_docsets,
                     searched_docsets=searched_docsets,
+                    catalog_hints=hints,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -974,6 +1073,7 @@ def main() -> int:
     if not all_results:
         if not failed_docsets:
             print("(无结果)")
+            print_catalog_hints(hints)
         return 0 if not failed_docsets else 1
 
     for i, r in enumerate(all_results, 1):

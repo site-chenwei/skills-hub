@@ -109,6 +109,77 @@ class DocsHubRunnerTests(unittest.TestCase):
             self.assertEqual(["testset"], [item["id"] for item in payload["docsets"]])
             self.assertEqual("indexed", payload["docsets"][0]["status"])
 
+            catalog_proc = subprocess.run(
+                [sys.executable, str(runner_path), "catalog", "--hub-root", str(hub_root), "--docset", "testset", "--json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(catalog_proc.returncode, 0, catalog_proc.stderr)
+            catalog_payload = json.loads(catalog_proc.stdout)
+            self.assertEqual(["testset"], [item["id"] for item in catalog_payload["docsets"]])
+            self.assertTrue((hub_root / "index" / "catalog.json").exists())
+
+            list_proc = subprocess.run(
+                [sys.executable, str(runner_path), "list", "--hub-root", str(hub_root), "--json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            list_payload = json.loads(list_proc.stdout)
+            self.assertEqual(["testset"], [item["id"] for item in list_payload["docsets"]])
+
+    def test_runner_init_auto_discovers_docs_subdirectories_and_updates_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            isolated_skill_root = Path(temp_dir) / "docs-hub"
+            source_skill_root = Path(__file__).resolve().parents[1]
+            copy_skill_tree(source_skill_root, isolated_skill_root)
+            runner_path = isolated_skill_root / "run.py"
+            hub_root = self.make_hub()
+            self.write_doc(
+                hub_root,
+                "auto.md",
+                """
+                ---
+                title: "auto doc"
+                source_url: "https://example.com/auto"
+                menu_path:
+                  - "指南"
+                ---
+
+                # auto doc
+
+                autodiscoverysentinel
+                """,
+                docset="autoset",
+            )
+
+            init_proc = subprocess.run(
+                [sys.executable, str(runner_path), "init", "--hub-root", str(hub_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                env=self.subprocess_env,
+            )
+
+            self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+            cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+            autoset = [item for item in cfg["docsets"] if item["id"] == "autoset"][0]
+            self.assertEqual("docs/autoset", autoset["root"])
+            self.assertTrue(autoset["auto_discovered"])
+            self.assertTrue((hub_root / "index" / "autoset.sqlite").exists())
+
+            catalog_payload = json.loads((hub_root / "index" / "catalog.json").read_text(encoding="utf-8"))
+            self.assertIn("autoset", [item["id"] for item in catalog_payload["docsets"]])
+
     def test_runner_init_accepts_positional_hub_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             isolated_skill_root = Path(temp_dir) / "docs-hub"
