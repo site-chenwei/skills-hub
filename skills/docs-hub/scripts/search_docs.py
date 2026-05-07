@@ -50,6 +50,7 @@ from catalog import (  # noqa: E402
 
 _FTS_SPECIAL = re.compile(r'[()":*+\^]')
 _QUERY_SPLIT_RE = re.compile(r"[\s,，、;；/|-]+")
+MAX_METADATA_ITEMS = 32
 
 
 class UnsafeIndexedPathError(ValueError):
@@ -487,7 +488,108 @@ def list_docsets(hub_root: Path) -> None:
         print(f"- {d['id']:<12} {d['name']:<20} root={d['root']}  [{d['status']}]{extra}")
 
 
-def status_payload(explicit_hub_root: str | None) -> dict[str, Any]:
+def has_explicit_metadata(docset: dict[str, Any]) -> bool:
+    if str(docset.get("description") or "").strip():
+        return True
+    for key in ("topics", "recommended_queries", "source_sets"):
+        value = docset.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(str(item).strip() for item in value):
+            return True
+    return False
+
+
+def count_warning_kinds(warnings_path: Path) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    invalid_lines = 0
+    read_error = ""
+    if warnings_path.exists():
+        try:
+            raw_lines = warnings_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raw_lines = []
+            read_error = str(exc)
+        for raw_line in raw_lines:
+            if not raw_line.strip():
+                continue
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                invalid_lines += 1
+                continue
+            kind = str(item.get("kind") or "unknown").strip() or "unknown"
+            counts[kind] = counts.get(kind, 0) + 1
+    return {
+        "path": warnings_path.resolve().as_posix(),
+        "exists": warnings_path.exists(),
+        "total": sum(counts.values()) + invalid_lines,
+        "kinds": counts,
+        "invalid_lines": invalid_lines,
+        "read_error": read_error,
+    }
+
+
+def metadata_recommendations(
+    *,
+    metadata_source: str,
+    warning_kinds: dict[str, int],
+) -> list[str]:
+    recommendations: list[str] = []
+    if metadata_source == "empty":
+        recommendations.append("补充 docsets.json topics/recommended_queries/source_sets，或检查索引是否包含可推断标题")
+    elif metadata_source == "inferred":
+        recommendations.append("当前使用自动推断元数据；重要 docset 建议补人工 topics/recommended_queries")
+    if warning_kinds.get("missing_source_url"):
+        recommendations.append("补充缺失 source_url，减少来源追溯缺口")
+    if warning_kinds.get("missing_title"):
+        recommendations.append("补充缺失 title 或一级标题，提升 catalog 与搜索可读性")
+    return recommendations
+
+
+def metadata_diagnostics(hub_root: Path) -> list[dict[str, Any]]:
+    cfg = load_docsets(hub_root)
+    catalog_payload = load_or_build_catalog(hub_root)
+    catalog_by_id = {str(item.get("id") or ""): item for item in catalog_payload.get("docsets", [])}
+    diagnostics: list[dict[str, Any]] = []
+
+    for docset in cfg.get("docsets", []):
+        try:
+            docset_id = safe_docset_id(docset)
+        except DocsetBuildError:
+            docset_id = str(docset.get("id") or "")
+        catalog_docset = catalog_by_id.get(docset_id, {})
+        topics = normalize_hint_items(catalog_docset.get("topics"), limit=MAX_METADATA_ITEMS)
+        queries = normalize_hint_items(catalog_docset.get("recommended_queries"), limit=MAX_METADATA_ITEMS)
+        source_sets = catalog_docset.get("source_sets") if isinstance(catalog_docset.get("source_sets"), list) else []
+        has_catalog_metadata = bool(topics or queries or source_sets)
+        if has_explicit_metadata(docset):
+            metadata_source = "explicit"
+        elif has_catalog_metadata:
+            metadata_source = "inferred"
+        else:
+            metadata_source = "empty"
+
+        warnings = count_warning_kinds(hub_root / "index" / f"{docset_id}.warnings.jsonl")
+        diagnostics.append(
+            {
+                "id": docset_id,
+                "name": str(docset.get("name") or docset_id),
+                "metadata_source": metadata_source,
+                "topics_count": len(topics),
+                "recommended_queries_count": len(queries),
+                "source_sets_count": len(source_sets),
+                "warnings": warnings,
+                "recommendations": metadata_recommendations(
+                    metadata_source=metadata_source,
+                    warning_kinds=warnings["kinds"],
+                ),
+            }
+        )
+    return diagnostics
+
+
+def status_payload(explicit_hub_root: str | None, *, include_metadata: bool = False) -> dict[str, Any]:
     root = Path(__file__).parent.parent
     state = load_init_state(root)
     state_hub_root = str(state.get("hub_root") or "") if state else ""
@@ -508,12 +610,18 @@ def status_payload(explicit_hub_root: str | None) -> dict[str, Any]:
         hub_root_error = str(exc)
         setup_errors.append(hub_root_error)
 
+    metadata: list[dict[str, Any]] = []
     if hub_root is not None:
         try:
             docsets, failed_docsets = collect_docset_status(hub_root)
         except Exception as exc:  # noqa: BLE001
             hub_root_error = f"读取 docsets 状态失败: {exc}"
             setup_errors.append(hub_root_error)
+        if include_metadata:
+            try:
+                metadata = metadata_diagnostics(hub_root)
+            except Exception as exc:  # noqa: BLE001
+                setup_errors.append(f"读取 metadata 诊断失败: {exc}")
 
     healthy_docsets = [docset["id"] for docset in docsets if docset.get("status") == "indexed"]
     ok = not setup_errors and not failed_docsets
@@ -534,6 +642,7 @@ def status_payload(explicit_hub_root: str | None) -> dict[str, Any]:
         "docsets": docsets,
         "results": [],
         "failed_docsets": failed_docsets,
+        "metadata": metadata,
     }
 
 
@@ -555,6 +664,24 @@ def print_status(payload: dict[str, Any]) -> None:
         if docset.get("documents") is not None and docset.get("chunks") is not None:
             extra = f" docs={docset['documents']} chunks={docset['chunks']}"
         print(f"  - {docset['id']:<12} [{docset['status']}] root={docset['root']}{extra}")
+
+
+def print_metadata_diagnostics(metadata: list[dict[str, Any]]) -> None:
+    if not metadata:
+        return
+    print("- metadata:")
+    for item in metadata:
+        warnings = item.get("warnings") if isinstance(item.get("warnings"), dict) else {}
+        warning_total = int(warnings.get("total") or 0)
+        kinds = warnings.get("kinds") if isinstance(warnings.get("kinds"), dict) else {}
+        kinds_text = ", ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())) or "none"
+        print(
+            f"  - {item['id']:<12} source={item['metadata_source']} "
+            f"topics={item['topics_count']} queries={item['recommended_queries_count']} "
+            f"sources={item['source_sets_count']} warnings={warning_total} ({kinds_text})"
+        )
+        for recommendation in item.get("recommendations", []):
+            print(f"    recommend: {recommendation}")
 
 
 def print_failed_docsets(failed_docsets: list[dict[str, Any]]) -> None:
@@ -900,16 +1027,19 @@ def main() -> int:
     ap.add_argument("--list-docsets", action="store_true")
     ap.add_argument("--catalog", action="store_true", help="输出 agent-facing 资料目录，不返回正文内容")
     ap.add_argument("--status", action="store_true", help="检查初始化、hub root 与索引状态，不触发重建")
+    ap.add_argument("--metadata", action="store_true", help="status/doctor 输出 catalog 元数据与 warnings 诊断")
     ap.add_argument("--json", action="store_true", help="输出 JSON 而非纯文本")
     ap.add_argument("keywords", nargs="*")
     args = ap.parse_args()
 
     if args.status:
-        payload = status_payload(args.hub_root)
+        payload = status_payload(args.hub_root, include_metadata=args.metadata)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print_status(payload)
+            if args.metadata:
+                print_metadata_diagnostics(payload.get("metadata", []))
         return 0 if payload["ok"] else 1
 
     state = ensure_initialized("查询文档")

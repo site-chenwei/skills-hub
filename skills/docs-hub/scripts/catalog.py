@@ -15,14 +15,35 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 CATALOG_FILENAME = "catalog.json"
+CATALOG_FRESHNESS_ALGORITHM = "docsets-json-index-meta-v1"
 DOCSET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DOCS_DIR_NAME = "docs"
 MAX_TOPICS = 8
 MAX_RECOMMENDED_QUERIES = 6
 MAX_SOURCE_SETS = 6
+MAX_TOPIC_CHARS = 64
+
+_NOISE_TOPIC_VALUES = {
+    "api",
+    "catalog",
+    "doc",
+    "docs",
+    "docset",
+    "documentation",
+    "index",
+    "overview",
+    "readme",
+    "source",
+    "source index",
+    "source-index",
+    "summary",
+}
+_STEM_SEPARATOR_RE = re.compile(r"[-_.]+")
+_SPACE_RE = re.compile(r"\s+")
 
 
 def catalog_path(hub_root: Path) -> Path:
@@ -120,6 +141,78 @@ def index_path_for_docset(hub_root: Path, docset_id: str) -> Path:
     return hub_root.resolve() / "index" / f"{docset_id}.sqlite"
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def index_freshness_state(db_path: Path) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "path": db_path.name,
+        "exists": db_path.exists(),
+        "status": "missing-index",
+        "built_at": "",
+        "build_signature": "",
+        "build_logic_version": "",
+        "documents": 0,
+        "chunks": 0,
+    }
+    if not db_path.exists():
+        return state
+
+    conn = sqlite3.connect(db_path)
+    try:
+        meta = {
+            str(key): str(value)
+            for key, value in conn.execute(
+                "SELECT key, value FROM meta WHERE key IN ('built_at', 'build_signature', 'build_logic_version')"
+            ).fetchall()
+        }
+        state.update(
+            {
+                "status": "indexed",
+                "built_at": meta.get("built_at", ""),
+                "build_signature": meta.get("build_signature", ""),
+                "build_logic_version": meta.get("build_logic_version", ""),
+                "documents": int(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]),
+                "chunks": int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]),
+            }
+        )
+    except sqlite3.Error:
+        state["status"] = "invalid-index"
+    finally:
+        conn.close()
+    return state
+
+
+def catalog_freshness(hub_root: Path) -> dict[str, str]:
+    cfg = load_docsets_config(hub_root)
+    docset_index_states: list[dict[str, Any]] = []
+    for docset in cfg.get("docsets", []):
+        raw_docset_id = str(docset.get("id") or "")
+        try:
+            docset_id = safe_docset_id_value(raw_docset_id)
+            index_state = index_freshness_state(index_path_for_docset(hub_root, docset_id))
+        except ValueError as exc:
+            index_state = {
+                "path": "",
+                "exists": False,
+                "status": "invalid-config",
+                "error": str(exc),
+            }
+        docset_index_states.append({"id": raw_docset_id, "index": index_state})
+
+    signature_payload = {
+        "algorithm": CATALOG_FRESHNESS_ALGORITHM,
+        "docsets_config": cfg,
+        "docset_indexes": docset_index_states,
+    }
+    signature = hashlib.sha256(canonical_json(signature_payload).encode("utf-8")).hexdigest()
+    return {
+        "algorithm": CATALOG_FRESHNESS_ALGORITHM,
+        "signature": signature,
+    }
+
+
 def normalize_string_list(value: Any, *, limit: int) -> list[str]:
     if isinstance(value, str):
         raw_items = [value]
@@ -170,29 +263,80 @@ def normalize_source_sets(value: Any) -> list[dict[str, str]]:
     return out
 
 
+def normalize_catalog_text(value: str) -> str:
+    return _SPACE_RE.sub(" ", value.strip())
+
+
+def filename_topic_candidate(rel_path: str) -> str:
+    stem = Path(rel_path).stem
+    if not stem:
+        return ""
+    return normalize_catalog_text(_STEM_SEPARATOR_RE.sub(" ", stem))
+
+
+def source_host(source_url: str) -> str:
+    url = source_url.strip()
+    if not url:
+        return ""
+    try:
+        host = urlparse(url).netloc.casefold()
+    except ValueError:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
 def infer_source_sets_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
     prefixes: Counter[str] = Counter()
+    hosts: Counter[str] = Counter()
     for row in rows:
         rel_path = str(row["rel_path"] or "")
         first_part = rel_path.split("/", 1)[0].strip()
         if first_part and first_part != rel_path:
             prefixes[first_part] += 1
+        host = source_host(str(row["source_url"] or ""))
+        if host:
+            hosts[host] += 1
+
     out = []
-    for source_id, _count in prefixes.most_common(MAX_SOURCE_SETS):
+    source_counts = prefixes if prefixes else hosts
+    for source_id, _count in source_counts.most_common(MAX_SOURCE_SETS):
         out.append({"id": source_id})
     return out
 
 
 def is_catalog_topic_candidate(value: str) -> bool:
-    topic = value.strip()
+    topic = normalize_catalog_text(value)
     if not topic:
         return False
     lowered = topic.casefold()
     if lowered.endswith((".md", ".markdown", ".mdx")):
         return False
-    if lowered in {"readme", "index", "catalog", "docset"}:
+    if lowered in _NOISE_TOPIC_VALUES:
+        return False
+    if len(topic) > MAX_TOPIC_CHARS:
+        return False
+    if not any(ch.isalnum() for ch in topic):
         return False
     return True
+
+
+def add_topic(counter: Counter[str], value: str, weight: int = 1) -> None:
+    topic = normalize_catalog_text(value)
+    if is_catalog_topic_candidate(topic):
+        counter[topic] += weight
+
+
+def append_counter_topics(topics: list[str], seen: set[str], counter: Counter[str]) -> None:
+    for value, _count in counter.most_common(MAX_TOPICS):
+        marker = value.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        topics.append(value)
+        if len(topics) >= MAX_TOPICS:
+            return
 
 
 def load_document_rows(db_path: Path) -> tuple[list[sqlite3.Row], int, str, str]:
@@ -226,29 +370,27 @@ def infer_topics(docset: dict[str, Any], rows: list[sqlite3.Row]) -> list[str]:
     sections: Counter[str] = Counter()
     first_dirs: Counter[str] = Counter()
     doc_types: Counter[str] = Counter()
+    flat_doc_topics: Counter[str] = Counter()
     for row in rows:
         section = str(row["section"] or "").strip()
-        if is_catalog_topic_candidate(section):
-            sections[section] += 1
+        add_topic(sections, section)
         doc_type = str(row["doc_type"] or "").strip()
         if doc_type and doc_type != "doc":
-            doc_types[doc_type] += 1
+            add_topic(doc_types, doc_type)
         rel_path = str(row["rel_path"] or "")
         first_part = rel_path.split("/", 1)[0].strip()
-        if first_part and first_part != rel_path and is_catalog_topic_candidate(first_part):
-            first_dirs[first_part] += 1
+        if first_part and first_part != rel_path:
+            add_topic(first_dirs, first_part)
+        if not first_part or first_part == rel_path:
+            add_topic(flat_doc_topics, str(row["title"] or ""), weight=3)
+            add_topic(flat_doc_topics, filename_topic_candidate(rel_path), weight=2)
 
     topics: list[str] = []
     seen: set[str] = set()
-    for counter in (sections, first_dirs, doc_types):
-        for value, _count in counter.most_common(MAX_TOPICS):
-            marker = value.casefold()
-            if marker in seen:
-                continue
-            seen.add(marker)
-            topics.append(value)
-            if len(topics) >= MAX_TOPICS:
-                return topics
+    for counter in (sections, first_dirs, doc_types, flat_doc_topics):
+        append_counter_topics(topics, seen, counter)
+        if len(topics) >= MAX_TOPICS:
+            return topics
     return topics
 
 
@@ -260,7 +402,7 @@ def infer_recommended_queries(docset: dict[str, Any], topics: list[str]) -> list
     name = str(docset.get("name") or docset.get("id") or "").strip()
     queries: list[str] = []
     for topic in topics:
-        if name and topic.casefold() not in name.casefold():
+        if name and name.casefold() not in topic.casefold():
             query = f"{name} {topic}"
         else:
             query = topic
@@ -331,6 +473,7 @@ def build_catalog_payload(hub_root: Path) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "hub_root": hub_root.resolve().as_posix(),
         "catalog_path": catalog_path(hub_root).as_posix(),
+        "freshness": catalog_freshness(hub_root),
         "docsets": docsets,
     }
 
@@ -343,14 +486,20 @@ def update_catalog(hub_root: Path) -> dict[str, Any]:
 
 def load_or_build_catalog(hub_root: Path, *, write_if_missing: bool = False) -> dict[str, Any]:
     path = catalog_path(hub_root)
+    current_freshness = catalog_freshness(hub_root)
     if path.exists():
         try:
             with path.open("r", encoding="utf-8") as f:
                 payload = json.load(f)
-            if isinstance(payload, dict) and isinstance(payload.get("docsets"), list):
+            if (
+                isinstance(payload, dict)
+                and isinstance(payload.get("docsets"), list)
+                and payload.get("freshness") == current_freshness
+            ):
                 return payload
         except (OSError, json.JSONDecodeError):
             pass
+        return update_catalog(hub_root)
     if write_if_missing:
         return update_catalog(hub_root)
     return build_catalog_payload(hub_root)

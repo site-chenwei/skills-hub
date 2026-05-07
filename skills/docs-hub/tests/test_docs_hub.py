@@ -468,6 +468,121 @@ class DocsHubSearchSkillTest(DocsHubRuntimeMixin, unittest.TestCase):
         self.assertEqual(["Provider import", "knowledge base", "OpenRouter"], payload["catalog_hints"][0]["topics"])
         self.assertEqual(["Provider import", "knowledge base"], payload["catalog_hints"][0]["recommended_queries"])
 
+    def test_catalog_infers_metadata_for_flat_docset_without_explicit_hints(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "provider-import.md",
+            """
+            ---
+            title: "Provider import"
+            source_url: "https://docs.openrouter.ai/providers/import"
+            menu_path:
+              - "provider-import.md"
+            ---
+
+            # Provider import
+
+            providerimportsentinel
+            """,
+        )
+        self.write_doc(
+            hub_root,
+            "knowledge-base.md",
+            """
+            ---
+            title: "Knowledge Base"
+            source_url: "https://docs.example.com/knowledge/base"
+            menu_path:
+              - "knowledge-base.md"
+            ---
+
+            # Knowledge Base
+
+            knowledgebasesentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        docset = load_or_build_catalog(hub_root)["docsets"][0]
+
+        self.assertIn("Provider import", docset["topics"])
+        self.assertIn("Knowledge Base", docset["topics"])
+        self.assertIn("Test Provider import", docset["recommended_queries"])
+        self.assertIn("Test Knowledge Base", docset["recommended_queries"])
+        self.assertIn("docs.openrouter.ai", [item["id"] for item in docset["source_sets"]])
+        self.assertIn("docs.example.com", [item["id"] for item in docset["source_sets"]])
+
+    def test_catalog_explicit_metadata_takes_precedence_over_inferred_metadata(self) -> None:
+        hub_root = self.make_hub()
+        cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))
+        cfg["docsets"][0].update(
+            {
+                "topics": ["Explicit Topic"],
+                "recommended_queries": ["Explicit Query"],
+                "source_sets": [{"id": "explicit-source", "description": "手写来源"}],
+            }
+        )
+        (hub_root / "docsets.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.write_doc(
+            hub_root,
+            "derived-topic.md",
+            """
+            ---
+            title: "Derived Topic"
+            source_url: "https://derived.example.com/reference"
+            menu_path:
+              - "derived-topic.md"
+            ---
+
+            # Derived Topic
+
+            explicitprecedencesentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        docset = load_or_build_catalog(hub_root)["docsets"][0]
+
+        self.assertEqual(["Explicit Topic"], docset["topics"])
+        self.assertEqual(["Explicit Query"], docset["recommended_queries"])
+        self.assertEqual([{"id": "explicit-source", "description": "手写来源"}], docset["source_sets"])
+
+    def test_status_metadata_reports_inferred_source_and_warning_counts(self) -> None:
+        hub_root = self.make_hub()
+        self.write_doc(
+            hub_root,
+            "derived-topic.md",
+            """
+            ---
+            title: "Derived Topic"
+            menu_path:
+              - "derived-topic.md"
+            ---
+
+            # Derived Topic
+
+            metadatadoctorsentinel
+            """,
+        )
+        self.run_build(hub_root)
+
+        proc = run_subprocess(
+            [PYTHON, str(SEARCH_SCRIPT), "--hub-root", str(hub_root), "--status", "--metadata", "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=self.subprocess_env,
+        )
+        payload = json.loads(proc.stdout)
+        metadata = payload["metadata"][0]
+
+        self.assertEqual("testset", metadata["id"])
+        self.assertEqual("inferred", metadata["metadata_source"])
+        self.assertGreater(metadata["topics_count"], 0)
+        self.assertEqual(1, metadata["warnings"]["kinds"]["missing_source_url"])
+        self.assertIn("补充缺失 source_url，减少来源追溯缺口", metadata["recommendations"])
+
     def test_catalog_file_outside_hub_root_is_reported_without_path_escape(self) -> None:
         hub_root = self.make_hub()
         cfg = json.loads((hub_root / "docsets.json").read_text(encoding="utf-8"))

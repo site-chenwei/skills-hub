@@ -40,6 +40,8 @@ Use this skill as the default retrieval gateway for documentation and factual/re
   Rebuild indexes from scratch. If `--docset` is omitted, the default target is `all`.
 - `$docs-hub status [--json]` / `$docs-hub doctor [--json]`
   Check init state, resolved hub root, docsets, and index health without rebuilding indexes.
+- `$docs-hub doctor --metadata [--json]`
+  Include catalog metadata source (`explicit` / `inferred` / `empty`), warning-kind counts, and concise remediation recommendations.
 
 ## When to use
 
@@ -114,13 +116,14 @@ Use this skill as the default retrieval gateway for documentation and factual/re
 
 - Use status/doctor for quick health checks only; these commands do not install dependencies, refresh indexes, or rebuild docsets.
 - JSON status output includes `initialized`, `hub_root`, `docsets`, `healthy_docsets`, and `failed_docsets`.
+- Use `doctor --metadata --json` when deciding whether a docset needs hand-authored catalog metadata or source URL cleanup.
 - Treat non-empty `failed_docsets` as a setup/index problem, not as evidence that the documentation has no answer.
 
 ## Catalog
 
 - Use `$docs-hub catalog --json` when an agent first needs to discover what local docsets can answer.
 - Keep catalog data concise. `docsets.json` may define short optional fields: `description`, `topics`, `recommended_queries`, `source_sets`, and `catalog_file`.
-- `index/catalog.json` is generated data. Do not paste it wholesale into the conversation; use it to choose a targeted `lookup` query.
+- `index/catalog.json` is generated data with a freshness signature. Do not paste it wholesale into the conversation; use it to choose a targeted `lookup` query.
 - If a `lookup` returns no results and the docset is healthy, inspect `catalog_hints` for recommended follow-up query terms.
 
 ## Content Publishing
