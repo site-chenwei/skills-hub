@@ -9,6 +9,7 @@ SKILL_ROOT = REPO_ROOT / "skills"
 
 SKILL_NAMES = [
     "docs-hub",
+    "grill-with-gsd",
     "harmony-build",
     "skill-repo-lifecycle",
 ]
