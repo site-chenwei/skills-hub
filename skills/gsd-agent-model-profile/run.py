@@ -17,7 +17,10 @@ COMMAND_FLAGS = {
 
 
 def print_usage() -> None:
-    print("usage: run.py {apply,dry-run,verify} [--agents-dir DIR|DIR]", file=sys.stderr)
+    print(
+        "usage: run.py {apply,dry-run,verify} [--agents-dir DIR|DIR] [--agent NAME] [--model MODEL] [--effort medium|high|xhigh]",
+        file=sys.stderr,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

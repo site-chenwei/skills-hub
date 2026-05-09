@@ -12,6 +12,7 @@ RUNNER_PATH = SKILL_ROOT / "run.py"
 
 XHIGH_AGENTS = [
     "gsd-assumptions-analyzer",
+    "gsd-code-reviewer",
     "gsd-planner",
     "gsd-plan-checker",
     "gsd-roadmapper",
@@ -24,7 +25,6 @@ HIGH_AGENTS = [
     "gsd-advisor-researcher",
     "gsd-ai-researcher",
     "gsd-code-fixer",
-    "gsd-code-reviewer",
     "gsd-debug-session-manager",
     "gsd-debugger",
     "gsd-doc-synthesizer",
@@ -138,6 +138,57 @@ class ApplyGsdAgentModelProfileTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertIn(str(missing_path), proc.stderr)
             self.assertIn("WOULD_UPDATE", proc.stdout)
+
+    def test_agent_filter_only_updates_target_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            agents_dir = Path(raw_dir)
+            create_fixture(agents_dir)
+
+            proc = run_script("--agents-dir", str(agents_dir), "--agent", "gsd-code-reviewer")
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("gsd-code-reviewer.toml", proc.stdout)
+            self.assertNotIn("gsd-planner.toml", proc.stdout)
+            reviewer_text = (agents_dir / "gsd-code-reviewer.toml").read_text(encoding="utf-8")
+            planner_text = (agents_dir / "gsd-planner.toml").read_text(encoding="utf-8")
+            self.assertTrue(reviewer_text.startswith('model = "gpt-5.5"\nmodel_reasoning_effort = "xhigh"\n'))
+            self.assertTrue(planner_text.startswith('name = "gsd-planner"\n'))
+
+    def test_agent_filter_allows_single_agent_model_override(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            agents_dir = Path(raw_dir)
+            create_fixture(agents_dir)
+
+            proc = run_script(
+                "--agents-dir",
+                str(agents_dir),
+                "--agent",
+                "gsd-codebase-mapper",
+                "--model",
+                "gpt-5.4",
+                "--effort",
+                "high",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            mapper_text = (agents_dir / "gsd-codebase-mapper.toml").read_text(encoding="utf-8")
+            classifier_text = (agents_dir / "gsd-doc-classifier.toml").read_text(encoding="utf-8")
+            self.assertTrue(mapper_text.startswith('model = "gpt-5.4"\nmodel_reasoning_effort = "high"\n'))
+            self.assertTrue(classifier_text.startswith('name = "gsd-doc-classifier"\n'))
+
+    def test_single_agent_mode_does_not_require_other_agents_to_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            agents_dir = Path(raw_dir)
+            (agents_dir / "gsd-code-reviewer.toml").write_text(
+                'model = "gpt-5.5"\nmodel_reasoning_effort = "xhigh"\nname = "gsd-code-reviewer"\n',
+                encoding="utf-8",
+            )
+
+            proc = run_script("--verify", "--agents-dir", str(agents_dir), "--agent", "gsd-code-reviewer")
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("gsd-code-reviewer.toml", proc.stdout)
+            self.assertNotIn("gsd-planner.toml", proc.stderr)
 
     def test_runner_dispatches_profile_commands(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
