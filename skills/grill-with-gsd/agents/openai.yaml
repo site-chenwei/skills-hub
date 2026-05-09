@@ -1,4 +1,4 @@
 interface:
   display_name: "grill-with-gsd"
-  short_description: "把 grill-me 决策同步进 GSD CONTEXT"
-  default_prompt: "Use $grill-with-gsd before a GSD plan phase to load the target phase CONTEXT.md, run grill-me for requirement clarification, confirm final decisions, and persist them into CONTEXT.md plus a structured GRILL.md evidence file without changing GSD runtime."
+  short_description: "把 grill-me 决策同步进 GSD 并自动交付"
+  default_prompt: "Use $grill-with-gsd before a GSD plan phase to load the target phase CONTEXT.md, run grill-me for requirement clarification, persist final decisions into CONTEXT.md plus a structured GRILL.md evidence file without final confirmation, then commit and push only those grill output files without changing GSD runtime."

@@ -12,7 +12,7 @@
 ## Active 能力形态
 
 - `docs-hub`：支持外部 DocsHub 根目录初始化、本地索引构建与文档检索；Skill bundle 本身不携带文档快照
-- `grill-with-gsd`：支持在 GSD plan 前调起 `grill-me` 澄清需求，并将确认结论同步回 phase `CONTEXT.md` 和结构化 `GRILL.md`
+- `grill-with-gsd`：支持在 GSD plan 前调起 `grill-me` 澄清需求，并将最终结论同步回 phase `CONTEXT.md` 和结构化 `GRILL.md`，结束后自动提交推送
 - `harmony-build`：支持 macOS Harmony 构建环境探测、缓存基线和 hvigor 验证
 - `skill-repo-lifecycle`：支持 repo-owned active/archive Skill 清单、聚合测试、安装目录一致性、归档残留检查和用户级 AGENTS 下沉边界检查
 
