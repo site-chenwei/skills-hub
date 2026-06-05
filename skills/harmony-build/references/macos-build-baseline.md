@@ -17,7 +17,7 @@
 
 ## 已验证的工具链形态
 
-- 仓库路径必须是 Mac 本机可访问路径。
+- `--repo` 必须是 Mac 本机可访问的 Harmony 项目根路径；AnyChat 这类外层业务仓库应传 `/Users/bill/WorkSpace/AnyChat/harmony`。
 - Harmony 项目标记通常包括：
   - `build-profile.json5`
   - `hvigorfile.ts`
@@ -42,11 +42,11 @@
 
 ## 探测策略
 
-1. 解析本地仓库路径。
+1. 解析本地 Harmony 项目根路径。
 2. 识别 Harmony 项目标记。
 3. 解析 Node、Java、Harmony SDK、DevEco Studio、`ohpm`、`hdc` 和 hvigor。
 4. 默认以 120 秒超时运行 `hvigor tasks` 做 preflight，非 JSON 模式会先输出进度。
-5. preflight 成功后保存按仓库隔离的 ready baseline。
+5. preflight 成功后保存按 Harmony 项目根隔离的 ready baseline。
 6. 后续验证默认复用 baseline；没有 baseline 时，`verify` 直接运行目标任务，任务成功后再保存 baseline。
 
 ## 错误映射
@@ -54,7 +54,7 @@
 ### `harmony_project_markers_missing`
 
 - 含义：当前目录不像 Harmony 项目根。
-- 处理：确认 `--repo` 是否指向项目根，而不是上级工作区或模块外目录。
+- 处理：确认 `--repo` 是否指向 Harmony 项目根，而不是上级业务仓库、工作区或模块外目录。
 
 ### `node_missing`
 
@@ -78,7 +78,7 @@
 
 ## 结论输出规则
 
-- 如果 `detect` 命中缓存且缓存来自成功 preflight，可以说当前仓库复用了已验证 ready baseline。
+- 如果 `detect` 命中缓存且缓存来自成功 preflight，可以说当前 Harmony 项目根复用了已验证 ready baseline。
 - 如果 `detect --skip-preflight` 成功，只能说静态依赖存在。
 - 如果 `build` 成功，可以说自动选择的 Mac 本机 hvigor 构建任务通过，不需要复述 hvigor 成功日志；如果失败，报告 `BUILD FAILED` 中的阶段、任务、退出码、是否超时和输出尾部。
 - 如果 `verify` 成功，可以明确说 Mac 本机对应 hvigor 任务通过。

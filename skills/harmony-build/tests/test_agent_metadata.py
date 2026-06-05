@@ -40,7 +40,15 @@ class HarmonyBuildAgentMetadataTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "installs only a .hap artifact under signedHap",
+            "Always pass --repo as the Harmony project root",
+            prompt,
+        )
+        self.assertIn(
+            "AnyChat/harmony",
+            prompt,
+        )
+        self.assertIn(
+            "automatically selects the newest signed .hap artifact",
             prompt,
         )
         self.assertIn(

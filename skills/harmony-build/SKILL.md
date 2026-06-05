@@ -7,7 +7,7 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 ## 概述
 
-这个 Skill 用于 Mac 本机 HarmonyOS / OpenHarmony 开发验证。它会识别当前仓库是否像 Harmony 项目，探测 Node、Java、Harmony SDK、DevEco Studio、`ohpm`、`hdc` 和 `hvigorw` / `hvigor`，并在需要时运行公开 hvigor 任务。一次 `detect` preflight 成功后，会按仓库缓存 ready baseline；后续同仓库任务默认复用它，而不是机械重跑探测。
+这个 Skill 用于 Mac 本机 HarmonyOS / OpenHarmony 开发验证。它会识别当前 `--repo` 指向的 Harmony 项目根是否可用，探测 Node、Java、Harmony SDK、DevEco Studio、`ohpm`、`hdc` 和 `hvigorw` / `hvigor`，并在需要时运行公开 hvigor 任务。一次 `detect` preflight 成功后，会按 Harmony 项目根缓存 ready baseline；后续同项目根任务默认复用它，而不是机械重跑探测。
 
 它不是“每次改完代码都要自动编译”的规则。只有在用户要求构建结论、改动影响 hvigor 构建链路，或更便宜的最小验证不足以覆盖风险时，才进入 `verify`。
 
@@ -49,21 +49,22 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 ## 工作流
 
-1. 解析仓库路径。
-   - Mac 本机路径直接使用当前目录或 `--repo <repo-path>`。
+1. 解析 Harmony 项目根路径。
+   - Mac 本机路径直接使用当前目录或 `--repo <harmony-project-root>`。
+   - `--repo` 必须指向包含 `hvigorw` / `hvigorfile.*` / `build-profile.json5` 等标记的 Harmony 项目根；例如 AnyChat 这类外层业务仓库应传 `/Users/bill/WorkSpace/AnyChat/harmony`，不要传 `/Users/bill/WorkSpace/AnyChat`。
    - 通过 `build-profile.json5`、`hvigorfile.*`、`oh-package.json5`、`AppScope/app.json5` 等标记判断是否像 Harmony 项目。
 2. 建立或刷新环境基线。
-   - 示例：`<python_cmd> <skill_root>/run.py detect --repo <repo-path>`
+   - 示例：`<python_cmd> <skill_root>/run.py detect --repo <harmony-project-root>`
    - 默认情况下，`detect` 会做静态探测，并运行一次 `hvigor tasks` 作为轻量 preflight。
-   - preflight 成功后保存该仓库 ready baseline；后续 `detect` / `verify` / `print-env` 默认复用缓存。
+   - preflight 成功后保存该 Harmony 项目根的 ready baseline；后续 `detect` / `verify` / `print-env` 默认复用缓存。
    - 只有在明确传 `--refresh` 时，才忽略缓存并重跑探测。
    - 只有在明确传 `--skip-preflight` 时，才跳过 `hvigor tasks`，只做静态探测；这种结果不会保存 ready baseline。
 3. 复用或刷新基线。
-   - 刚修改过 Node、Java、SDK、DevEco Studio、`ohpm`、`hdc`、项目 wrapper 或仓库路径时，加 `--refresh`。
+   - 刚修改过 Node、Java、SDK、DevEco Studio、`ohpm`、`hdc`、项目 wrapper 或 Harmony 项目根路径时，加 `--refresh`。
    - 缓存命中的 `verify` 报出环境类错误时，脚本会自动刷新一次基线后重试。
 4. 需要解释环境阻塞、缓存策略或失败映射时，读取 `references/macos-build-baseline.md`。
 5. 需要最终构建结论时，直接运行当前最小可证明任务：
-   - `<python_cmd> <skill_root>/run.py verify --repo <repo-path> --task <task>`
+   - `<python_cmd> <skill_root>/run.py verify --repo <harmony-project-root> --task <task>`
    - `--task` 必须是公开 hvigor task 名，不要传 `.hvigor` 内部 key，例如 `:entry:default@CompileArkTS`。
 6. 明确说明结论来源：
    - 是来自 Mac 本机 `hvigor` / `hvigorw` 实际验证
@@ -72,9 +73,9 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 ## 入口脚本
 
 - `<skill_root>/run.py detect`
-  - 探测运行宿主、仓库路径、Harmony 项目标记、Node、Java、Harmony SDK、DevEco Studio、`hvigor`、`ohpm` 和 `hdc`。
+  - 探测运行宿主、Harmony 项目根路径、项目标记、Node、Java、Harmony SDK、DevEco Studio、`hvigor`、`ohpm` 和 `hdc`。
   - 会读取 `build-profile.json5` 里的 `runtimeOS`；`HarmonyOS` 项目优先选择包含 `hms` 与 `openharmony` 组件的 DevEco SDK 根目录，避免把 OpenHarmony API 版本目录误判为可用 HarmonyOS SDK。
-  - 默认运行 `hvigor tasks` 做 preflight；ready 时保存按仓库隔离的缓存基线。
+  - 默认运行 `hvigor tasks` 做 preflight；ready 时保存按 Harmony 项目根隔离的缓存基线。
   - `--refresh` 用于忽略缓存并重跑完整探测。
   - `--skip-preflight` 用于跳过 preflight，只做静态探测。
   - `--timeout-seconds <seconds>` 控制 preflight 的 `hvigor tasks` 超时，默认 120 秒；非 JSON 模式会在等待 hvigor 前向 stderr 输出 preflight 进度。
@@ -103,9 +104,10 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - JSON 输出会保留 `verification.phase`、`verification.task`、`verification.timed_out` 和 `timeout_seconds`；成功时清空 hvigor 输出字段，失败时保留错误尾部。
 
 - `<skill_root>/run.py install-hap`
-  - 通过 `hdc install` 把 HAP 安装到真机或模拟器；只查找和安装 `signedHap` 目录中的 `.hap`，不查找 `.app`，也不 fallback 到普通 `.hap`。
-  - 未显式传 `--hap` 时，只选择仓库下 `signedHap` 目录中的 `.hap` 产物；适合测试场景中 `assembleHap` 后直接安装签名 HAP。
-  - 可用 `--hap <path>` 显式指定产物；相对路径按 `--repo` 解析，且路径必须是 `signedHap` 下的 `.hap`。
+  - 通过 `hdc install` 把 HAP 安装到真机或模拟器；默认只需要传 Harmony 项目根 `--repo <harmony-project-root>`，脚本会在根目录下递归查找最新 signed HAP。
+  - 未显式传 `--hap` 时，选择 `signedHap` 目录中的 `.hap` 或文件名包含 `signed` 且不包含 `unsigned` 的 `.hap`，例如 `entry/build/default/outputs/default/entry-default-signed.hap`。
+  - 可用 `--hap <path>` 显式指定产物；相对路径按 `--repo` 解析，且目标必须是 signed `.hap`。
+  - 不查找 `.app`，也不安装 unsigned `.hap`。
   - 多设备连接时传 `--target <hdc-target-id>`；可用 `--timeout-seconds <seconds>` 控制 `hdc install` 等待时间。
   - JSON 输出会保留实际 HAP 路径、选择原因、`hdc` 路径、命令和安装输出。
 
@@ -116,16 +118,16 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - 默认快照模式执行 `hdc hilog -x -z <buffer-lines>`，读取设备端日志缓存尾部并在 agent 侧二次过滤；如果设备侧命令没有及时自然退出，包装层会按 `--timeout-seconds` 受控停止后再过滤输出；可用 `--duration-seconds <n>` 切到限时实时抓取。
   - 输出默认最多返回 `--max-lines` 条匹配日志，避免把设备全量日志灌进上下文。
   - 常用命令：
-    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --keyword <keyword> --max-lines 120`
-    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --app <bundle-name> --keyword <keyword> --duration-seconds 20`
-    - `<python_cmd> <skill_root>/run.py capture-logs --repo <repo-path> --tag <tag> --level ERROR --json`
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <harmony-project-root> --keyword <keyword> --max-lines 120`
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <harmony-project-root> --app <bundle-name> --keyword <keyword> --duration-seconds 20`
+    - `<python_cmd> <skill_root>/run.py capture-logs --repo <harmony-project-root> --tag <tag> --level ERROR --json`
   - 多设备连接时传 `--target <hdc-target-id>`，目标 id 可先用 `hdc list targets` 或 DevEco 的设备列表确认。
   - 只有用户明确要求全设备日志时才传 `--allow-unfiltered`。
 
 - `<skill_root>/run.py verify`
   - 默认优先复用缓存基线；缺失、失效或显式 `--refresh` 时，只做静态探测，然后直接运行目标任务。
   - 必须显式传 `--task <public task>`；未传时返回用法错误，不默认运行 `tasks`。
-  - 非 `tasks` 目标任务成功后会把该仓库写入 ready baseline，后续命令可复用。
+  - 非 `tasks` 目标任务成功后会把该 Harmony 项目根写入 ready baseline，后续命令可复用。
   - 注入 `DEVECO_SDK_HOME`，并在缺省时同步 `HOS_SDK_HOME` / `OHOS_SDK_HOME`。
   - 如已解析出 `NODE_HOME` / `JAVA_HOME`，会注入到 hvigor 子进程。
   - hvigor 输出会重定向到临时文件，进程退出后只读取尾部摘要，避免长日志拖慢包装层。
@@ -139,9 +141,9 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 ## 输出规则
 
 - 只有在需要给出最终构建结论时，才要求使用 `verify`。
-- 同仓库已有 ready baseline 时，可以把环境判定建立在该基线之上；不要机械地重复跑 `detect`。
+- 同 Harmony 项目根已有 ready baseline 时，可以把环境判定建立在该基线之上；不要机械地重复跑 `detect`。
 - 需要构建验证但调用方不确定 task 时，用 `build` 固定运行裸 `assembleHap`；只有已经明确 public task 时，才直接用 `verify --task <task>`。
-- 需要把测试产物安装到设备时，用 `install-hap` 只安装 `signedHap` 产物；不要转去找 `signedApp`，也不要安装普通 `.hap`。
+- 需要把测试产物安装到设备时，用 `install-hap --repo <harmony-project-root>`，让脚本自动选择最新 signed HAP；不要转去找 `signedApp`，也不要安装 unsigned `.hap`。
 - 不要把 `verify --task tasks` 作为默认前置步骤；显式运行它只用于任务列表或环境排查，不写 ready baseline；需要任务选择时用 `build` 或 `list-tasks`。
 - 不要把 `assembleApp` 当成默认验证命令；除非本次任务确实需要 App 级产物结论。
 - 如果没有找到可工作的 SDK、Node 或 hvigor wrapper，报告环境阻塞，不要猜测代码问题。

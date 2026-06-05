@@ -1056,8 +1056,34 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["hap"]["path"], str(resolved_signed_hap))
-        self.assertIn("signedHap", result["hap"]["selection_reason"])
+        self.assertIn("signed .hap", result["hap"]["selection_reason"])
         self.assertIn("install success", result["install"]["output"])
+        run_mock.assert_called_once()
+
+    def test_install_hap_finds_default_signed_hap_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            outputs = repo / "entry" / "build" / "default" / "outputs" / "default"
+            unsigned_hap = outputs / "entry-default-unsigned.hap"
+            signed_hap = outputs / "entry-default-signed.hap"
+            outputs.mkdir(parents=True)
+            unsigned_hap.write_text("unsigned", encoding="utf-8")
+            signed_hap.write_text("signed", encoding="utf-8")
+            resolved_signed_hap = signed_hap.resolve()
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(args, ["/tools/hdc", "install", str(resolved_signed_hap)])
+                return HARMONY_BUILD.subprocess.CompletedProcess(args, 0, stdout="install success", stderr="")
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run) as run_mock,
+            ):
+                result = HARMONY_BUILD.install_hap(str(repo))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["hap"]["path"], str(resolved_signed_hap))
         run_mock.assert_called_once()
 
     def test_install_hap_rejects_unsigned_hap_artifact(self) -> None:
@@ -1076,7 +1102,7 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["exit_code"], 2)
-        self.assertIn("signedHap", result["install"]["output"])
+        self.assertIn("signed .hap", result["install"]["output"])
         run_mock.assert_not_called()
 
     def test_install_hap_target_is_passed_to_hdc(self) -> None:

@@ -2173,7 +2173,13 @@ def hap_artifact_rank(path: Path) -> tuple[int, float, str]:
 
 
 def is_signed_hap_artifact(path: Path) -> bool:
-    return path.suffix.casefold() == ".hap" and "signedhap" in [part.casefold() for part in path.parts]
+    if path.suffix.casefold() != ".hap":
+        return False
+    parts = [part.casefold() for part in path.parts]
+    name = path.name.casefold()
+    if "signedhap" in parts:
+        return True
+    return "signed" in name and "unsigned" not in name
 
 
 def find_hap_artifacts(repo: Path) -> list[Path]:
@@ -2200,14 +2206,14 @@ def resolve_hap_artifact(repo: Path, hap_path: str | None = None) -> tuple[Path 
             artifact = repo / artifact
         artifact = artifact.resolve()
         if not is_signed_hap_artifact(artifact):
-            return artifact, "explicit --hap is not a signedHap .hap artifact"
+            return artifact, "explicit --hap is not a signed .hap artifact"
         return artifact, "explicit --hap"
 
     artifacts = find_hap_artifacts(repo)
     if not artifacts:
-        return None, "no signedHap .hap artifact found under repo"
+        return None, "no signed .hap artifact found under repo"
     selected = artifacts[0]
-    return selected, "selected latest signedHap .hap artifact"
+    return selected, "selected latest signed .hap artifact"
 
 
 def run_hdc_install_command(command: list[str], *, timeout_seconds: int) -> dict:
@@ -2284,7 +2290,7 @@ def install_hap(
             "install": {
                 "success": False,
                 "exit_code": 2,
-                "output": "No signedHap .hap artifact was found. Build with assembleHap and install only the signedHap output, or pass --hap <signedHap .hap path>.",
+                "output": "No signed .hap artifact was found under the Harmony project root. Build with assembleHap and install the signed HAP output, or pass --hap <signed .hap path>.",
                 "timed_out": False,
             },
         }
@@ -2537,7 +2543,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_hap_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
     install_hap_parser.add_argument(
         "--hap",
-        help="Explicit signedHap .hap artifact path. Relative paths are resolved from --repo. Omit to select the newest signedHap .hap artifact.",
+        help="Explicit signed .hap artifact path. Relative paths are resolved from --repo. Omit to select the newest signed .hap artifact under the Harmony project root.",
     )
     install_hap_parser.add_argument("--target", help="hdc target id used with `hdc -t <target>` when multiple devices are connected.")
     install_hap_parser.add_argument(
