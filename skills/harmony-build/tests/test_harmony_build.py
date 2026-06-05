@@ -624,6 +624,14 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertIsNone(result["recommendations"][0]["task_template"])
         self.assertIn("需先列出公开 hvigor tasks", result["recommendations"][0]["reason"])
 
+    def test_select_build_task_prefers_module_hap_over_generic_build_and_app(self) -> None:
+        task, reason = HARMONY_BUILD.select_build_task(
+            ["build", "assembleApp", ":feature:assembleHap", ":entry:assembleHap"]
+        )
+
+        self.assertEqual(task, ":entry:assembleHap")
+        self.assertIn("module-level assembleHap", reason)
+
     def test_build_project_auto_selects_preferred_public_build_task(self) -> None:
         detection = {
             "ready": True,
@@ -656,18 +664,12 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertEqual(result["task_list"]["output"], "")
         self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", "assembleApp"])
 
-    def test_build_project_prefers_public_path_recommendation(self) -> None:
+    def test_build_project_runs_path_recommendation_without_task_listing(self) -> None:
         detection = {
             "ready": True,
             "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
             "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
             "cache": {"source": "cache"},
-        }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": ":entry:assembleHap - Assemble entry hap\nassembleApp - Assemble the packaged app\n",
-            "timed_out": False,
         }
         build_outcome = {
             "success": True,
@@ -680,15 +682,46 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
             repo = Path(temp_dir)
             with (
                 mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-                mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[tasks_outcome, build_outcome]) as verify_mock,
+                mock.patch.object(HARMONY_BUILD, "verify_task", return_value=build_outcome) as verify_mock,
             ):
                 result = HARMONY_BUILD.build_project(str(repo), paths=["entry/src/main/ets/pages/Index.ets"])
 
         self.assertEqual(result["selected_task"], ":entry:assembleHap")
-        self.assertIn("path recommendation", result["selection_reason"])
+        self.assertIn("without task listing", result["selection_reason"])
         self.assertEqual(result["verification"]["output"], "")
-        self.assertEqual(result["task_list"]["output"], "")
-        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", ":entry:assembleHap"])
+        self.assertIsNone(result["task_list"])
+        verify_mock.assert_called_once()
+        self.assertEqual(verify_mock.call_args.args[1], ":entry:assembleHap")
+
+    def test_build_project_infers_entry_hap_without_task_listing(self) -> None:
+        build_outcome = {
+            "success": True,
+            "exit_code": 0,
+            "output": "BUILD SUCCESSFUL in 1 s",
+            "timed_out": False,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            (repo / "entry" / "src" / "main").mkdir(parents=True)
+            (repo / "entry" / "src" / "main" / "module.json5").write_text("{}", encoding="utf-8")
+            detection = {
+                "ready": True,
+                "repo": {"input": str(repo), "local_path": str(repo), "local_exists": True},
+                "resolved": {"sdk_home": "/sdk", "hvigor_path": str(repo / "hvigorw")},
+                "cache": {"source": "cache"},
+            }
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
+                mock.patch.object(HARMONY_BUILD, "verify_task", return_value=build_outcome) as verify_mock,
+            ):
+                result = HARMONY_BUILD.build_project(str(repo))
+
+        self.assertEqual(result["selected_task"], ":entry:assembleHap")
+        self.assertIn("inferred module HAP", result["selection_reason"])
+        self.assertIsNone(result["task_list"])
+        verify_mock.assert_called_once()
+        self.assertEqual(verify_mock.call_args.args[1], ":entry:assembleHap")
 
     def test_build_project_reports_when_no_public_build_task_can_be_selected(self) -> None:
         detection = {
@@ -1199,6 +1232,56 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                 candidates = HARMONY_BUILD.candidate_hdc_paths()
 
         self.assertIn(str(hdc_path.resolve()), candidates)
+
+    def test_install_hap_prefers_signed_hap_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            unsigned_hap = repo / "entry" / "build" / "default" / "outputs" / "hap" / "entry.hap"
+            signed_hap = repo / "entry" / "build" / "default" / "outputs" / "signedHap" / "entry-signed.hap"
+            unsigned_hap.parent.mkdir(parents=True)
+            signed_hap.parent.mkdir(parents=True)
+            unsigned_hap.write_text("unsigned", encoding="utf-8")
+            signed_hap.write_text("signed", encoding="utf-8")
+            resolved_signed_hap = signed_hap.resolve()
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(args, ["/tools/hdc", "install", str(resolved_signed_hap)])
+                return HARMONY_BUILD.subprocess.CompletedProcess(args, 0, stdout="install success", stderr="")
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run) as run_mock,
+            ):
+                result = HARMONY_BUILD.install_hap(str(repo))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["hap"]["path"], str(resolved_signed_hap))
+        self.assertIn("signedHap", result["hap"]["selection_reason"])
+        self.assertIn("install success", result["install"]["output"])
+        run_mock.assert_called_once()
+
+    def test_install_hap_target_is_passed_to_hdc(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            hap = repo / "entry" / "build" / "default" / "outputs" / "signedHap" / "entry-signed.hap"
+            hap.parent.mkdir(parents=True)
+            hap.write_text("signed", encoding="utf-8")
+            resolved_hap = hap.resolve()
+
+            def fake_run(args, **kwargs):
+                self.assertEqual(args, ["/tools/hdc", "-t", "SERIAL", "install", str(resolved_hap)])
+                return HARMONY_BUILD.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run", side_effect=fake_run),
+            ):
+                result = HARMONY_BUILD.install_hap(str(repo), target="SERIAL")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["target"], "SERIAL")
 
     def test_read_project_bundle_name_ignores_json5_comments(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

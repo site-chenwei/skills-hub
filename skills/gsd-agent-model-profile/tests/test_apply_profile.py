@@ -25,8 +25,10 @@ HIGH_AGENTS = [
     "gsd-advisor-researcher",
     "gsd-ai-researcher",
     "gsd-code-fixer",
+    "gsd-codebase-mapper",
     "gsd-debug-session-manager",
     "gsd-debugger",
+    "gsd-doc-classifier",
     "gsd-doc-synthesizer",
     "gsd-doc-verifier",
     "gsd-doc-writer",
@@ -34,7 +36,9 @@ HIGH_AGENTS = [
     "gsd-eval-auditor",
     "gsd-executor",
     "gsd-framework-selector",
+    "gsd-intel-updater",
     "gsd-nyquist-auditor",
+    "gsd-pattern-mapper",
     "gsd-phase-researcher",
     "gsd-project-researcher",
     "gsd-research-synthesizer",
@@ -43,16 +47,9 @@ HIGH_AGENTS = [
     "gsd-ui-researcher",
     "gsd-user-profiler",
 ]
-MEDIUM_AGENTS = [
-    "gsd-codebase-mapper",
-    "gsd-doc-classifier",
-    "gsd-intel-updater",
-    "gsd-pattern-mapper",
-]
 EXPECTED_EFFORT = {
     **{name: "xhigh" for name in XHIGH_AGENTS},
     **{name: "high" for name in HIGH_AGENTS},
-    **{name: "medium" for name in MEDIUM_AGENTS},
 }
 
 

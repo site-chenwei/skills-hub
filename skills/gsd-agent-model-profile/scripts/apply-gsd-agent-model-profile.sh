@@ -41,8 +41,10 @@ for name in [
     "gsd-advisor-researcher",
     "gsd-ai-researcher",
     "gsd-code-fixer",
+    "gsd-codebase-mapper",
     "gsd-debug-session-manager",
     "gsd-debugger",
+    "gsd-doc-classifier",
     "gsd-doc-synthesizer",
     "gsd-doc-verifier",
     "gsd-doc-writer",
@@ -50,7 +52,9 @@ for name in [
     "gsd-eval-auditor",
     "gsd-executor",
     "gsd-framework-selector",
+    "gsd-intel-updater",
     "gsd-nyquist-auditor",
+    "gsd-pattern-mapper",
     "gsd-phase-researcher",
     "gsd-project-researcher",
     "gsd-research-synthesizer",
@@ -60,15 +64,6 @@ for name in [
     "gsd-user-profiler",
 ]:
     PROFILES[name] = "high"
-
-for name in [
-    "gsd-codebase-mapper",
-    "gsd-doc-classifier",
-    "gsd-intel-updater",
-    "gsd-pattern-mapper",
-]:
-    PROFILES[name] = "medium"
-
 
 FIELD_PATTERN = re.compile(r"^\s*(model|model_reasoning_effort)\s*=\s*(.*?)\s*(?:#.*)?$")
 TABLE_PATTERN = re.compile(r"^\s*\[")

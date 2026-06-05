@@ -16,6 +16,7 @@ COMMANDS = {
     "list-tasks",
     "verify",
     "build",
+    "install-hap",
     "capture-logs",
     "print-env",
 }
@@ -23,7 +24,7 @@ COMMANDS = {
 
 def print_usage() -> None:
     print(
-        "usage: run.py {detect,doctor,recommend-task,list-tasks,verify,build,capture-logs,print-env} [args...]",
+        "usage: run.py {detect,doctor,recommend-task,list-tasks,verify,build,install-hap,capture-logs,print-env} [args...]",
         file=sys.stderr,
     )
 

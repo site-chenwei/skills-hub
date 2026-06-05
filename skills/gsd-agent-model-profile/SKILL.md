@@ -73,6 +73,8 @@ python3 <skill_root>/run.py apply --agent gsd-code-reviewer
 
 ## Reasoning Effort Policy
 
+Default profiles do not assign any agent below `high`; `medium` remains available only as an explicit `--agent` override.
+
 `xhigh`:
 
 - `gsd-assumptions-analyzer`
@@ -90,8 +92,10 @@ python3 <skill_root>/run.py apply --agent gsd-code-reviewer
 - `gsd-advisor-researcher`
 - `gsd-ai-researcher`
 - `gsd-code-fixer`
+- `gsd-codebase-mapper`
 - `gsd-debug-session-manager`
 - `gsd-debugger`
+- `gsd-doc-classifier`
 - `gsd-doc-synthesizer`
 - `gsd-doc-verifier`
 - `gsd-doc-writer`
@@ -99,7 +103,9 @@ python3 <skill_root>/run.py apply --agent gsd-code-reviewer
 - `gsd-eval-auditor`
 - `gsd-executor`
 - `gsd-framework-selector`
+- `gsd-intel-updater`
 - `gsd-nyquist-auditor`
+- `gsd-pattern-mapper`
 - `gsd-phase-researcher`
 - `gsd-project-researcher`
 - `gsd-research-synthesizer`
@@ -107,10 +113,3 @@ python3 <skill_root>/run.py apply --agent gsd-code-reviewer
 - `gsd-ui-checker`
 - `gsd-ui-researcher`
 - `gsd-user-profiler`
-
-`medium`:
-
-- `gsd-codebase-mapper`
-- `gsd-doc-classifier`
-- `gsd-intel-updater`
-- `gsd-pattern-mapper`

@@ -11,7 +11,7 @@
 - 只有实际运行了 `verify --task <task>` 且任务成功，才能说 Mac 本机 hvigor 验证通过。
 - `detect` 默认运行 `hvigor tasks` 作为环境 preflight；它能证明环境和任务列表可用，但不能替代具体构建任务。preflight 默认超时为 120 秒，可用 `detect --timeout-seconds <seconds>` 覆盖；非 JSON 模式会在等待 hvigor 前输出 preflight 进度。
 - `detect --skip-preflight` 只代表静态探测，不代表 hvigor 已验证。
-- `build` 是面向 agent 的高层构建入口，会自动列出公开 tasks、选择构建任务并运行；自动列任务阶段成功时读取完整 tasks 输出用于解析公开任务，非 JSON 模式会输出阶段进度，最终输出成功/失败、阶段、任务、退出码和耗时。成功时不回传 hvigor 日志，失败时才回传错误尾部。
+- `build` 是面向 agent 的高层构建入口；有路径推荐或可从仓库模块目录推断 HAP 任务时，会直接运行 `assembleHap` / `:<module>:assembleHap`，推断不到才自动列出公开 tasks 并选择构建任务。自动列任务阶段成功时读取完整 tasks 输出用于解析公开任务，非 JSON 模式会输出阶段进度，最终输出成功/失败、阶段、任务、退出码和耗时。成功时不回传 hvigor 日志，失败时才回传错误尾部。
 - `build --timeout-seconds` 是整条 build flow 的 hvigor 等待预算，默认 900 秒；自动 `hvigor tasks` 阶段默认 `--list-timeout-seconds 120`，避免任务列表阶段长时间空等。超时后进程清理会有短暂兜底等待。
 - `verify --task <task>` 在没有可用缓存时不会先插入 `hvigor tasks`；它只做静态探测，然后直接运行目标任务。
 

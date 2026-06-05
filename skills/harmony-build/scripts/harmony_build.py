@@ -62,13 +62,20 @@ PROJECT_CONFIG_IGNORED_DIRS = {".git", ".hvigor", "build", "node_modules", "oh_m
 TASK_LINE_RE = re.compile(r"^\s*([:\w.-]+)\s+-\s+")
 APP_BUNDLE_NAME_RE = re.compile(r"""["']?bundleName["']?\s*:\s*["']([^"']+)["']""")
 HILOG_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL", "D", "I", "W", "E", "F"}
-BUILD_TASK_PREFERENCE = (
+HAP_BUILD_TASK_PREFERENCE = (
     "assembleHap",
+)
+GENERIC_BUILD_TASK_PREFERENCE = (
+    "build",
+)
+APP_BUILD_TASK_PREFERENCE = (
     "assembleApp",
     "PackageApp",
     "SignPackagesFromApp",
-    "build",
 )
+DEFAULT_MODULE_NAME_PREFERENCE = ("entry", "phone", "default")
+HAP_ARTIFACT_IGNORED_DIRS = {".git", ".hvigor", "node_modules", "oh_modules"}
+HDC_INSTALL_TIMEOUT_SECONDS = 120
 
 
 def strip_ansi(text: str) -> str:
@@ -1034,6 +1041,41 @@ def recommend_tasks_for_paths(repo_arg: str | None, paths: list[str]) -> dict:
     }
 
 
+def concrete_recommended_build_task(recommendations: dict | None) -> tuple[str | None, str]:
+    if not recommendations:
+        return None, "no path recommendation"
+    for item in recommendations.get("recommendations") or []:
+        template = item.get("task_template")
+        if template and not template.startswith("<"):
+            return template, f"selected path recommendation for {item.get('path')} without task listing"
+    return None, "no concrete path recommendation"
+
+
+def discover_harmony_modules(repo: Path) -> list[str]:
+    if not repo.exists() or not repo.is_dir():
+        return []
+
+    modules = []
+    for child in repo.iterdir():
+        if not child.is_dir() or child.name.startswith(".") or child.name in PROJECT_CONFIG_IGNORED_DIRS:
+            continue
+        if (child / "src" / "main" / "module.json5").is_file():
+            modules.append(child.name)
+            continue
+        if (child / "build-profile.json5").is_file() and (child / "src").is_dir():
+            modules.append(child.name)
+
+    preference = {name: index for index, name in enumerate(DEFAULT_MODULE_NAME_PREFERENCE)}
+    return sorted(set(modules), key=lambda name: (preference.get(name, len(preference)), name))
+
+
+def inferred_default_hap_task(repo: Path) -> tuple[str | None, str]:
+    modules = discover_harmony_modules(repo)
+    if modules:
+        return f":{modules[0]}:assembleHap", f"selected inferred module HAP task for {modules[0]} without task listing"
+    return None, "no Harmony module with src/main/module.json5 was found"
+
+
 def print_task_recommendations(result: dict) -> None:
     print("Task recommendations:")
     for item in result.get("recommendations") or []:
@@ -1069,9 +1111,25 @@ def select_build_task(public_tasks: list[str], recommendations: dict | None = No
             if template and template in task_set and not template.startswith("<"):
                 return template, f"selected path recommendation for {item.get('path')}"
 
-    for preferred in BUILD_TASK_PREFERENCE:
+    for preferred in HAP_BUILD_TASK_PREFERENCE:
         if preferred in task_set:
             return preferred, "selected preferred public build task from hvigor tasks"
+    module_hap_tasks = sorted(task for task in public_tasks if task.endswith(":assembleHap"))
+    if module_hap_tasks:
+        preference = {name: index for index, name in enumerate(DEFAULT_MODULE_NAME_PREFERENCE)}
+        module_hap_tasks.sort(
+            key=lambda task: (
+                preference.get(task.split(":")[1] if task.startswith(":") and ":" in task[1:] else "", len(preference)),
+                task,
+            )
+        )
+        return module_hap_tasks[0], "selected module-level assembleHap from hvigor tasks"
+    for preferred in GENERIC_BUILD_TASK_PREFERENCE:
+        if preferred in task_set:
+            return preferred, "selected generic public build task from hvigor tasks"
+    for preferred in APP_BUILD_TASK_PREFERENCE:
+        if preferred in task_set:
+            return preferred, "selected app-level public build task from hvigor tasks"
     return None, "no public build task matched known build task names"
 
 
@@ -1629,6 +1687,11 @@ def build_project(
     selection_reason = "explicit --task"
     refreshed_after_failure = False
 
+    if not selected_task:
+        selected_task, selection_reason = concrete_recommended_build_task(recommendations)
+    if not selected_task:
+        repo_path = Path((result.get("repo") or {}).get("local_path") or repo_arg or ".")
+        selected_task, selection_reason = inferred_default_hap_task(repo_path)
     if not selected_task:
         remaining = remaining_timeout_seconds(started_at, timeout_seconds)
         if remaining <= 0:
@@ -2314,6 +2377,203 @@ def capture_hilog(
     }
 
 
+def hap_artifact_rank(path: Path) -> tuple[int, float, str]:
+    parts = [part.casefold() for part in path.parts]
+    signed_rank = 0 if "signedhap" in parts else 1
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return signed_rank, -mtime, str(path)
+
+
+def find_hap_artifacts(repo: Path) -> list[Path]:
+    if not repo.exists() or not repo.is_dir():
+        return []
+
+    artifacts = []
+    for path in repo.rglob("*.hap"):
+        try:
+            relative_parts = path.relative_to(repo).parts
+        except ValueError:
+            relative_parts = path.parts
+        if any(part in HAP_ARTIFACT_IGNORED_DIRS for part in relative_parts):
+            continue
+        if path.is_file():
+            artifacts.append(path)
+    return sorted(artifacts, key=hap_artifact_rank)
+
+
+def resolve_hap_artifact(repo: Path, hap_path: str | None = None) -> tuple[Path | None, str]:
+    if hap_path:
+        artifact = Path(hap_path).expanduser()
+        if not artifact.is_absolute():
+            artifact = repo / artifact
+        return artifact, "explicit --hap"
+
+    artifacts = find_hap_artifacts(repo)
+    if not artifacts:
+        return None, "no .hap artifact found under repo"
+    selected = artifacts[0]
+    if "signedhap" in [part.casefold() for part in selected.parts]:
+        return selected, "selected latest signedHap .hap artifact"
+    return selected, "selected latest .hap artifact"
+
+
+def run_hdc_install_command(command: list[str], *, timeout_seconds: int) -> dict:
+    started_at = time.monotonic()
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+        output = clean_hvigor_output(combine_process_output(result.stdout, result.stderr))
+        return {
+            "success": result.returncode == 0,
+            "exit_code": result.returncode,
+            "output": summarize_output(output, max_lines=24),
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+    except subprocess.TimeoutExpired as error:
+        output = clean_hvigor_output(combine_process_output(error.stdout, error.stderr))
+        return {
+            "success": False,
+            "exit_code": 124,
+            "output": summarize_output(output, max_lines=24),
+            "timed_out": True,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+    except OSError as error:
+        return {
+            "success": False,
+            "exit_code": getattr(error, "errno", 1) or 1,
+            "output": str(error),
+            "timed_out": False,
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        }
+
+
+def install_hap(
+    repo_arg: str | None,
+    *,
+    hap_path: str | None = None,
+    target: str | None = None,
+    timeout_seconds: int = HDC_INSTALL_TIMEOUT_SECONDS,
+) -> dict:
+    repo_info = resolve_repo_paths(repo_arg)
+    repo = Path(repo_info["local_path"])
+    sdk_home, sdk_candidates = resolve_sdk_root(repo)
+    hdc_path, hdc_candidates = resolve_hdc_path(sdk_home)
+    artifact, selection_reason = resolve_hap_artifact(repo, hap_path)
+
+    if not artifact or not artifact.is_file():
+        return {
+            "success": False,
+            "exit_code": 2,
+            "repo": repo_info,
+            "resolved": {
+                "sdk_home": sdk_home,
+                "hdc_path": hdc_path,
+            },
+            "candidates": {
+                "sdk_home": sdk_candidates,
+                "hdc_path": hdc_candidates,
+            },
+            "hap": {
+                "path": str(artifact) if artifact else None,
+                "selection_reason": selection_reason,
+            },
+            "target": target,
+            "command": None,
+            "install": {
+                "success": False,
+                "exit_code": 2,
+                "output": "No .hap artifact was found. Build with assembleHap and use the signedHap output, or pass --hap <path>.",
+                "timed_out": False,
+            },
+        }
+
+    if not hdc_path:
+        return {
+            "success": False,
+            "exit_code": 1,
+            "repo": repo_info,
+            "resolved": {
+                "sdk_home": sdk_home,
+                "hdc_path": None,
+            },
+            "candidates": {
+                "sdk_home": sdk_candidates,
+                "hdc_path": hdc_candidates,
+            },
+            "hap": {
+                "path": str(artifact),
+                "selection_reason": selection_reason,
+            },
+            "target": target,
+            "command": None,
+            "install": {
+                "success": False,
+                "exit_code": 1,
+                "output": "hdc executable was not found. Install DevEco Studio or add hdc to PATH.",
+                "timed_out": False,
+            },
+        }
+
+    command = [hdc_path]
+    if target:
+        command.extend(["-t", target])
+    command.extend(["install", str(artifact)])
+    outcome = run_hdc_install_command(command, timeout_seconds=timeout_seconds)
+    return {
+        "success": bool(outcome["success"]),
+        "exit_code": outcome["exit_code"],
+        "repo": repo_info,
+        "resolved": {
+            "sdk_home": sdk_home,
+            "hdc_path": hdc_path,
+        },
+        "candidates": {
+            "sdk_home": sdk_candidates,
+            "hdc_path": hdc_candidates,
+        },
+        "hap": {
+            "path": str(artifact),
+            "selection_reason": selection_reason,
+        },
+        "target": target,
+        "command": command,
+        "install": outcome,
+    }
+
+
+def print_install_hap_result(result: dict) -> None:
+    install = result.get("install") or {}
+    resolved = result.get("resolved") or {}
+    hap = result.get("hap") or {}
+    print("INSTALL SUCCESS" if result.get("success") else "INSTALL FAILED")
+    print(f"HAP: {hap.get('path') or 'NOT FOUND'}")
+    if hap.get("selection_reason"):
+        print(f"Selection: {hap['selection_reason']}")
+    print(f"hdc: {resolved.get('hdc_path') or 'NOT FOUND'}")
+    if result.get("target"):
+        print(f"Target: {result['target']}")
+    print(f"Exit code: {install.get('exit_code')}")
+    if install.get("duration_seconds") is not None:
+        print(f"Duration: {install['duration_seconds']}s")
+    if install.get("timed_out"):
+        print("Timed out: yes")
+    if install.get("output"):
+        print("Output:")
+        print(install["output"])
+
+
 def print_hilog_capture(result: dict) -> None:
     capture = result.get("capture") or {}
     resolved = result.get("resolved") or {}
@@ -2488,6 +2748,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore cached ready baselines and rerun detection before building.",
     )
+
+    install_hap_parser = subparsers.add_parser("install-hap", help="Install a signed HAP artifact to a connected device through hdc.")
+    install_hap_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
+    install_hap_parser.add_argument(
+        "--hap",
+        help="Explicit .hap artifact path. Relative paths are resolved from --repo. Defaults to the preferred signedHap artifact.",
+    )
+    install_hap_parser.add_argument("--target", help="hdc target id used with `hdc -t <target>` when multiple devices are connected.")
+    install_hap_parser.add_argument(
+        "--timeout-seconds",
+        type=positive_int,
+        default=HDC_INSTALL_TIMEOUT_SECONDS,
+        help=f"Hard timeout for `hdc install`. Defaults to {HDC_INSTALL_TIMEOUT_SECONDS}.",
+    )
+    install_hap_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
 
     logs_parser = subparsers.add_parser("capture-logs", help="Capture bounded device HiLog output through hdc.")
     logs_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
@@ -2727,6 +3002,19 @@ def main() -> int:
             else:
                 print_build_result(result)
             return result["verification"]["exit_code"]
+
+        if args.command == "install-hap":
+            result = install_hap(
+                args.repo,
+                hap_path=args.hap,
+                target=args.target,
+                timeout_seconds=args.timeout_seconds,
+            )
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print_install_hap_result(result)
+            return result["exit_code"]
 
         if args.command == "capture-logs":
             result = capture_hilog(

@@ -36,7 +36,11 @@ class HarmonyBuildAgentMetadataTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "parse complete successful tasks output",
+            "prefer path-inferred or module-inferred assembleHap tasks directly",
+            prompt,
+        )
+        self.assertIn(
+            "run.py install-hap",
             prompt,
         )
         self.assertIn(
