@@ -36,11 +36,11 @@ class HarmonyBuildAgentMetadataTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "prefer path-inferred or module-inferred assembleHap tasks directly",
+            "must run the bare assembleHap task directly",
             prompt,
         )
         self.assertIn(
-            "run.py install-hap",
+            "installs only a .hap artifact under signedHap",
             prompt,
         )
         self.assertIn(

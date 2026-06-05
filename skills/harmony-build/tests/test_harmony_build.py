@@ -597,7 +597,7 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
 
         self.assertEqual(runtime_os, "OpenHarmony")
 
-    def test_recommend_tasks_maps_pages_resources_and_module_config_to_module_templates(self) -> None:
+    def test_recommend_tasks_maps_paths_to_bare_assemble_hap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result = HARMONY_BUILD.recommend_tasks_for_paths(
                 temp_dir,
@@ -606,44 +606,23 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
                     "entry/src/main/resources/base/element/string.json",
                     "entry/build-profile.json5",
                     "feature/oh-package.json5",
+                    "docs/usage.md",
                 ],
             )
 
         templates = [item["task_template"] for item in result["recommendations"]]
-        self.assertEqual(templates, [":entry:assembleHap", ":entry:assembleHap", ":entry:assembleHap", ":feature:assembleHap"])
+        self.assertEqual(templates, ["assembleHap", "assembleHap", "assembleHap", "assembleHap", "assembleHap"])
         self.assertFalse(result["needs_list_tasks"])
         self.assertEqual(result["recommendations"][0]["kind"], "ets")
         self.assertEqual(result["recommendations"][1]["kind"], "resources")
         self.assertEqual(result["recommendations"][2]["kind"], "module_config")
 
-    def test_recommend_tasks_marks_unknown_paths_for_task_listing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            result = HARMONY_BUILD.recommend_tasks_for_paths(temp_dir, ["docs/usage.md"])
-
-        self.assertTrue(result["needs_list_tasks"])
-        self.assertIsNone(result["recommendations"][0]["task_template"])
-        self.assertIn("需先列出公开 hvigor tasks", result["recommendations"][0]["reason"])
-
-    def test_select_build_task_prefers_module_hap_over_generic_build_and_app(self) -> None:
-        task, reason = HARMONY_BUILD.select_build_task(
-            ["build", "assembleApp", ":feature:assembleHap", ":entry:assembleHap"]
-        )
-
-        self.assertEqual(task, ":entry:assembleHap")
-        self.assertIn("module-level assembleHap", reason)
-
-    def test_build_project_auto_selects_preferred_public_build_task(self) -> None:
+    def test_build_project_defaults_to_bare_assemble_hap_without_task_listing(self) -> None:
         detection = {
             "ready": True,
             "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
             "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
             "cache": {"source": "cache"},
-        }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "tasks - Displays tasks\nassembleApp - Assemble the packaged app\n",
-            "timed_out": False,
         }
         build_outcome = {
             "success": True,
@@ -651,20 +630,26 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
             "output": "BUILD SUCCESSFUL in 1 s",
             "timed_out": False,
         }
+        messages = []
 
         with (
             mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-            mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[tasks_outcome, build_outcome]) as verify_mock,
+            mock.patch.object(HARMONY_BUILD, "verify_task", return_value=build_outcome) as verify_mock,
         ):
-            result = HARMONY_BUILD.build_project("/repo")
+            result = HARMONY_BUILD.build_project("/repo", progress=messages.append)
 
-        self.assertEqual(result["selected_task"], "assembleApp")
+        self.assertEqual(result["selected_task"], "assembleHap")
+        self.assertEqual(result["selection_reason"], "default assembleHap")
         self.assertTrue(result["verification"]["success"])
         self.assertEqual(result["verification"]["output"], "")
-        self.assertEqual(result["task_list"]["output"], "")
-        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", "assembleApp"])
+        self.assertIsNone(result["task_list"])
+        self.assertEqual(result["public_tasks"], [])
+        verify_mock.assert_called_once()
+        self.assertEqual(verify_mock.call_args.args[1], "assembleHap")
+        self.assertTrue(any("build" in message for message in messages))
+        self.assertFalse(any("list-tasks" in message for message in messages))
 
-    def test_build_project_runs_path_recommendation_without_task_listing(self) -> None:
+    def test_build_project_paths_do_not_change_default_assemble_hap(self) -> None:
         detection = {
             "ready": True,
             "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
@@ -686,135 +671,11 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
             ):
                 result = HARMONY_BUILD.build_project(str(repo), paths=["entry/src/main/ets/pages/Index.ets"])
 
-        self.assertEqual(result["selected_task"], ":entry:assembleHap")
-        self.assertIn("without task listing", result["selection_reason"])
-        self.assertEqual(result["verification"]["output"], "")
+        self.assertEqual(result["selected_task"], "assembleHap")
+        self.assertEqual(result["recommendations"]["recommendations"][0]["task_template"], "assembleHap")
         self.assertIsNone(result["task_list"])
         verify_mock.assert_called_once()
-        self.assertEqual(verify_mock.call_args.args[1], ":entry:assembleHap")
-
-    def test_build_project_infers_entry_hap_without_task_listing(self) -> None:
-        build_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "BUILD SUCCESSFUL in 1 s",
-            "timed_out": False,
-        }
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            repo = Path(temp_dir)
-            (repo / "entry" / "src" / "main").mkdir(parents=True)
-            (repo / "entry" / "src" / "main" / "module.json5").write_text("{}", encoding="utf-8")
-            detection = {
-                "ready": True,
-                "repo": {"input": str(repo), "local_path": str(repo), "local_exists": True},
-                "resolved": {"sdk_home": "/sdk", "hvigor_path": str(repo / "hvigorw")},
-                "cache": {"source": "cache"},
-            }
-            with (
-                mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-                mock.patch.object(HARMONY_BUILD, "verify_task", return_value=build_outcome) as verify_mock,
-            ):
-                result = HARMONY_BUILD.build_project(str(repo))
-
-        self.assertEqual(result["selected_task"], ":entry:assembleHap")
-        self.assertIn("inferred module HAP", result["selection_reason"])
-        self.assertIsNone(result["task_list"])
-        verify_mock.assert_called_once()
-        self.assertEqual(verify_mock.call_args.args[1], ":entry:assembleHap")
-
-    def test_build_project_reports_when_no_public_build_task_can_be_selected(self) -> None:
-        detection = {
-            "ready": True,
-            "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
-            "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
-            "cache": {"source": "cache"},
-        }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "tasks - Displays tasks\ntaskTree - Displays task tree\n",
-            "timed_out": False,
-        }
-
-        with (
-            mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-            mock.patch.object(HARMONY_BUILD, "verify_task", return_value=tasks_outcome) as verify_mock,
-        ):
-            result = HARMONY_BUILD.build_project("/repo")
-
-        self.assertIsNone(result["selected_task"])
-        self.assertFalse(result["verification"]["success"])
-        self.assertEqual(result["verification"]["exit_code"], 2)
-        self.assertEqual(result["task_list"]["output"], "")
-        verify_mock.assert_called_once()
-
-    def test_build_project_uses_short_task_list_timeout_and_reports_progress(self) -> None:
-        detection = {
-            "ready": True,
-            "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
-            "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
-            "cache": {"source": "cache"},
-        }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "assembleApp - Assemble the packaged app\n",
-            "timed_out": False,
-        }
-        build_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "BUILD SUCCESSFUL in 1 s",
-            "timed_out": False,
-        }
-        messages = []
-
-        with (
-            mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-            mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[tasks_outcome, build_outcome]) as verify_mock,
-        ):
-            result = HARMONY_BUILD.build_project("/repo", progress=messages.append)
-
-        self.assertTrue(result["verification"]["success"])
-        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", "assembleApp"])
-        self.assertEqual(
-            [call.args[2] for call in verify_mock.call_args_list],
-            [HARMONY_BUILD.HVIGOR_TASK_LIST_TIMEOUT_SECONDS, HARMONY_BUILD.HVIGOR_TASK_TIMEOUT_SECONDS],
-        )
-        self.assertEqual(result["verification"]["phase"], "build")
-        self.assertTrue(any("list-tasks" in message for message in messages))
-        self.assertTrue(any("build" in message for message in messages))
-        self.assertEqual([call.kwargs.get("full_output") for call in verify_mock.call_args_list], [True, None])
-
-    def test_build_project_preserves_task_listing_timeout_as_final_failure(self) -> None:
-        detection = {
-            "ready": True,
-            "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
-            "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
-            "cache": {"source": "cache"},
-        }
-        tasks_outcome = {
-            "success": False,
-            "exit_code": 124,
-            "output": "hvigor task timed out after 120 seconds.",
-            "timed_out": True,
-            "duration_seconds": 120.0,
-        }
-
-        with (
-            mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-            mock.patch.object(HARMONY_BUILD, "verify_task", return_value=tasks_outcome) as verify_mock,
-        ):
-            result = HARMONY_BUILD.build_project("/repo")
-
-        verify_mock.assert_called_once()
-        self.assertIsNone(result["selected_task"])
-        self.assertTrue(result["verification"]["timed_out"])
-        self.assertEqual(result["verification"]["exit_code"], 124)
-        self.assertEqual(result["verification"]["phase"], "list-tasks")
-        self.assertEqual(result["verification"]["task"], "tasks")
-        self.assertIn("timed out", result["verification"]["output"])
+        self.assertEqual(verify_mock.call_args.args[1], "assembleHap")
 
     def test_build_project_stops_when_deadline_exhausted_before_build_task(self) -> None:
         detection = {
@@ -823,76 +684,20 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
             "resolved": {"sdk_home": "/sdk", "hvigor_path": "/repo/hvigorw"},
             "cache": {"source": "cache"},
         }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "assembleApp - Assemble the packaged app\n",
-            "timed_out": False,
-        }
 
         with (
             mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", return_value=detection),
-            mock.patch.object(HARMONY_BUILD, "verify_task", return_value=tasks_outcome) as verify_mock,
-            mock.patch.object(HARMONY_BUILD.time, "monotonic", side_effect=[100.0, 100.0, 103.1, 103.1]),
+            mock.patch.object(HARMONY_BUILD, "verify_task") as verify_mock,
+            mock.patch.object(HARMONY_BUILD.time, "monotonic", side_effect=[100.0, 103.1, 103.1]),
         ):
-            result = HARMONY_BUILD.build_project("/repo", timeout_seconds=3, list_timeout_seconds=3)
+            result = HARMONY_BUILD.build_project("/repo", timeout_seconds=3)
 
-        verify_mock.assert_called_once()
-        self.assertEqual(verify_mock.call_args.args[1], "tasks")
-        self.assertEqual(verify_mock.call_args.args[2], 3)
-        self.assertEqual(result["selected_task"], "assembleApp")
+        verify_mock.assert_not_called()
+        self.assertEqual(result["selected_task"], "assembleHap")
         self.assertFalse(result["verification"]["success"])
         self.assertTrue(result["verification"]["timed_out"])
         self.assertEqual(result["verification"]["exit_code"], 124)
         self.assertEqual(result["verification"]["phase"], "build")
-
-    def test_build_project_task_listing_retry_uses_remaining_deadline(self) -> None:
-        cached_detection = {
-            "ready": True,
-            "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
-            "resolved": {"sdk_home": "/stale-sdk", "hvigor_path": "/repo/hvigorw"},
-            "cache": {"source": "cache"},
-        }
-        fresh_detection = {
-            "ready": True,
-            "repo": {"input": "/repo", "local_path": "/repo", "local_exists": True},
-            "resolved": {"sdk_home": "/fresh-sdk", "hvigor_path": "/repo/hvigorw"},
-            "cache": {"source": "fresh"},
-        }
-        env_failure = {
-            "success": False,
-            "exit_code": 1,
-            "output": "SDK component missing",
-            "timed_out": False,
-        }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "assembleApp - Assemble the packaged app\n",
-            "timed_out": False,
-        }
-        build_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "BUILD SUCCESSFUL in 1 s",
-            "timed_out": False,
-        }
-
-        with (
-            mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", side_effect=[cached_detection, fresh_detection]),
-            mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[env_failure, tasks_outcome, build_outcome]) as verify_mock,
-            mock.patch.object(HARMONY_BUILD, "save_cached_detection", return_value={"source": "fresh", "saved": True}),
-            mock.patch.object(HARMONY_BUILD.time, "monotonic", side_effect=[100.0, 100.0, 103.0, 104.0, 105.0]),
-        ):
-            result = HARMONY_BUILD.build_project("/repo", timeout_seconds=10, list_timeout_seconds=10)
-
-        self.assertTrue(result["refreshed_after_failure"])
-        self.assertTrue(result["verification"]["success"])
-        self.assertEqual(result["verification"]["output"], "")
-        self.assertEqual(result["task_list"]["output"], "")
-        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", "tasks", "assembleApp"])
-        self.assertEqual([call.args[2] for call in verify_mock.call_args_list], [10, 7, 6])
-        self.assertEqual([call.kwargs.get("full_output") for call in verify_mock.call_args_list], [True, True, None])
 
     def test_build_project_build_retry_uses_remaining_deadline(self) -> None:
         cached_detection = {
@@ -907,12 +712,6 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
             "resolved": {"sdk_home": "/fresh-sdk", "hvigor_path": "/repo/hvigorw"},
             "cache": {"source": "fresh"},
         }
-        tasks_outcome = {
-            "success": True,
-            "exit_code": 0,
-            "output": "assembleApp - Assemble the packaged app\n",
-            "timed_out": False,
-        }
         env_failure = {
             "success": False,
             "exit_code": 1,
@@ -928,19 +727,19 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
 
         with (
             mock.patch.object(HARMONY_BUILD, "resolve_verification_detection", side_effect=[cached_detection, fresh_detection]),
-            mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[tasks_outcome, env_failure, build_outcome]) as verify_mock,
+            mock.patch.object(HARMONY_BUILD, "verify_task", side_effect=[env_failure, build_outcome]) as verify_mock,
             mock.patch.object(HARMONY_BUILD, "save_cached_detection", return_value={"source": "fresh", "saved": True}),
-            mock.patch.object(HARMONY_BUILD.time, "monotonic", side_effect=[200.0, 200.0, 201.0, 204.0, 205.0]),
+            mock.patch.object(HARMONY_BUILD.time, "monotonic", side_effect=[200.0, 200.0, 204.0, 205.0]),
         ):
-            result = HARMONY_BUILD.build_project("/repo", timeout_seconds=20, list_timeout_seconds=20)
+            result = HARMONY_BUILD.build_project("/repo", timeout_seconds=20)
 
         self.assertTrue(result["refreshed_after_failure"])
         self.assertTrue(result["verification"]["success"])
         self.assertEqual(result["verification"]["output"], "")
-        self.assertEqual(result["task_list"]["output"], "")
-        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["tasks", "assembleApp", "assembleApp"])
-        self.assertEqual([call.args[2] for call in verify_mock.call_args_list], [20, 19, 16])
-        self.assertEqual([call.kwargs.get("full_output") for call in verify_mock.call_args_list], [True, None, None])
+        self.assertIsNone(result["task_list"])
+        self.assertEqual([call.args[1] for call in verify_mock.call_args_list], ["assembleHap", "assembleHap"])
+        self.assertEqual([call.args[2] for call in verify_mock.call_args_list], [20, 16])
+        self.assertEqual([call.kwargs.get("full_output") for call in verify_mock.call_args_list], [None, None])
 
     def test_verify_task_can_request_full_success_output(self) -> None:
         detection = {
@@ -1260,6 +1059,25 @@ class HarmonyBuildRegressionTests(unittest.TestCase):
         self.assertIn("signedHap", result["hap"]["selection_reason"])
         self.assertIn("install success", result["install"]["output"])
         run_mock.assert_called_once()
+
+    def test_install_hap_rejects_unsigned_hap_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            unsigned_hap = repo / "entry" / "build" / "default" / "outputs" / "hap" / "entry.hap"
+            unsigned_hap.parent.mkdir(parents=True)
+            unsigned_hap.write_text("unsigned", encoding="utf-8")
+
+            with (
+                mock.patch.object(HARMONY_BUILD, "resolve_sdk_root", return_value=("/sdk", ["/sdk"])),
+                mock.patch.object(HARMONY_BUILD, "resolve_hdc_path", return_value=("/tools/hdc", ["/tools/hdc"])),
+                mock.patch.object(HARMONY_BUILD.subprocess, "run") as run_mock,
+            ):
+                result = HARMONY_BUILD.install_hap(str(repo), hap_path=str(unsigned_hap))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 2)
+        self.assertIn("signedHap", result["install"]["output"])
+        run_mock.assert_not_called()
 
     def test_install_hap_target_is_passed_to_hdc(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

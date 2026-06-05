@@ -85,8 +85,8 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - 环境不 ready 时仍返回诊断结果，适合解释阻塞原因。
 
 - `<skill_root>/run.py recommend-task`
-  - 基于改动路径推荐最小公开 hvigor 任务模板。
-  - 无法稳定映射时要求先列出公开任务，不伪造内部 `.hvigor` task key。
+  - 基于改动路径提示默认构建任务；结果固定为裸 `assembleHap`。
+  - 不根据路径推断 `:<module>:assembleHap`，也不要求先列公开 tasks 猜任务名。
 
 - `<skill_root>/run.py list-tasks`
   - 运行公开 `hvigor tasks` 列表流程，仅在需要查看任务或排查环境漂移时使用。
@@ -94,19 +94,18 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
   - 默认硬超时为 120 秒，非 JSON 模式会在等待 hvigor 前向 stderr 输出进度。
 
 - `<skill_root>/run.py build`
-  - 面向 agent 的高层构建入口：自动探测环境、优先直接选择 `assembleHap` / `:<module>:assembleHap` 并执行。
-  - 默认优先选路径推荐命中的模块级 HAP 任务；没有路径时会从仓库模块目录推断 `:entry:assembleHap` / `:<module>:assembleHap`，推断不到才列出公开 tasks。
-  - 只有进入自动列任务阶段时，才读取完整 tasks 输出用于解析公开任务；最终普通输出和 JSON 输出仍保持紧凑，成功时不回传 tasks 日志。
-  - 非 JSON 模式会先向 stderr 输出 `detect` / `build` 阶段进度；只有需要列任务时才输出 `list-tasks` 阶段进度。
+  - 面向 agent 的高层构建入口：自动探测环境，然后固定运行裸 `assembleHap`。
+  - 不列公开 tasks 来选择任务，不根据路径或模块名推断 `:entry:assembleHap` / `:<module>:assembleHap`。
+  - 非 JSON 模式只输出 `detect` / `build` 阶段进度。
   - 普通输出只报告 `BUILD SUCCESS` / `BUILD FAILED`、实际任务、SDK、阶段、退出码和耗时；成功时不回传 hvigor 日志，失败时才回传错误尾部。
-  - 可用 `--paths <paths...>` 帮助选择更小的构建任务；可用 `--task <public task>` 显式覆盖自动选择。
-  - `--timeout-seconds <seconds>` 是整条 build flow 的 hvigor 等待预算，默认 900 秒；自动列任务阶段另有 `--list-timeout-seconds <seconds>`，默认 120 秒。超时后进程清理会有短暂兜底等待。
-  - JSON 输出会保留 `verification.phase`、`verification.task`、`verification.timed_out`、`timeout_seconds` 和 `list_timeout_seconds`；成功时清空 hvigor 输出字段，失败时保留错误尾部。
+  - 可用 `--task <public task>` 显式覆盖默认任务；`--paths <paths...>` 只记录上下文，不改变默认 `assembleHap`。
+  - `--timeout-seconds <seconds>` 是整条 build flow 的 hvigor 等待预算，默认 900 秒。超时后进程清理会有短暂兜底等待。
+  - JSON 输出会保留 `verification.phase`、`verification.task`、`verification.timed_out` 和 `timeout_seconds`；成功时清空 hvigor 输出字段，失败时保留错误尾部。
 
 - `<skill_root>/run.py install-hap`
-  - 通过 `hdc install` 把 HAP 安装到真机或模拟器；默认只查找 `.hap`，不查找 `.app`。
-  - 未显式传 `--hap` 时，会优先选择仓库下 `signedHap` 目录中的 `.hap` 产物；适合测试场景中 `assembleHap` 后直接安装签名 HAP。
-  - 可用 `--hap <path>` 显式指定产物；相对路径按 `--repo` 解析。
+  - 通过 `hdc install` 把 HAP 安装到真机或模拟器；只查找和安装 `signedHap` 目录中的 `.hap`，不查找 `.app`，也不 fallback 到普通 `.hap`。
+  - 未显式传 `--hap` 时，只选择仓库下 `signedHap` 目录中的 `.hap` 产物；适合测试场景中 `assembleHap` 后直接安装签名 HAP。
+  - 可用 `--hap <path>` 显式指定产物；相对路径按 `--repo` 解析，且路径必须是 `signedHap` 下的 `.hap`。
   - 多设备连接时传 `--target <hdc-target-id>`；可用 `--timeout-seconds <seconds>` 控制 `hdc install` 等待时间。
   - JSON 输出会保留实际 HAP 路径、选择原因、`hdc` 路径、命令和安装输出。
 
@@ -141,8 +140,8 @@ description: Use when a task needs macOS HarmonyOS/OpenHarmony hvigor environmen
 
 - 只有在需要给出最终构建结论时，才要求使用 `verify`。
 - 同仓库已有 ready baseline 时，可以把环境判定建立在该基线之上；不要机械地重复跑 `detect`。
-- 需要构建验证但调用方不确定 task 时，优先用 `build`；只有已经明确 public task 时，才直接用 `verify --task <task>`。
-- 需要把测试产物安装到设备且未显式要求 App 级包时，优先用 `install-hap` 安装 `signedHap` 产物，不要转去找 `signedApp`。
+- 需要构建验证但调用方不确定 task 时，用 `build` 固定运行裸 `assembleHap`；只有已经明确 public task 时，才直接用 `verify --task <task>`。
+- 需要把测试产物安装到设备时，用 `install-hap` 只安装 `signedHap` 产物；不要转去找 `signedApp`，也不要安装普通 `.hap`。
 - 不要把 `verify --task tasks` 作为默认前置步骤；显式运行它只用于任务列表或环境排查，不写 ready baseline；需要任务选择时用 `build` 或 `list-tasks`。
 - 不要把 `assembleApp` 当成默认验证命令；除非本次任务确实需要 App 级产物结论。
 - 如果没有找到可工作的 SDK、Node 或 hvigor wrapper，报告环境阻塞，不要猜测代码问题。

@@ -59,21 +59,9 @@ SDK_COMPONENT_MARKERS = ("ets", "js", "native", "toolchains", "kits", "api")
 MODULE_CONFIG_FILES = {"build-profile.json5", "oh-package.json5", "hvigorfile.ts", "hvigorfile.js"}
 RUNTIME_OS_RE = re.compile(r"""["']?runtimeOS["']?\s*:\s*["']([^"']+)["']""")
 PROJECT_CONFIG_IGNORED_DIRS = {".git", ".hvigor", "build", "node_modules", "oh_modules"}
-TASK_LINE_RE = re.compile(r"^\s*([:\w.-]+)\s+-\s+")
 APP_BUNDLE_NAME_RE = re.compile(r"""["']?bundleName["']?\s*:\s*["']([^"']+)["']""")
 HILOG_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL", "D", "I", "W", "E", "F"}
-HAP_BUILD_TASK_PREFERENCE = (
-    "assembleHap",
-)
-GENERIC_BUILD_TASK_PREFERENCE = (
-    "build",
-)
-APP_BUILD_TASK_PREFERENCE = (
-    "assembleApp",
-    "PackageApp",
-    "SignPackagesFromApp",
-)
-DEFAULT_MODULE_NAME_PREFERENCE = ("entry", "phone", "default")
+DEFAULT_HAP_BUILD_TASK = "assembleHap"
 HAP_ARTIFACT_IGNORED_DIRS = {".git", ".hvigor", "node_modules", "oh_modules"}
 HDC_INSTALL_TIMEOUT_SECONDS = 120
 
@@ -990,10 +978,10 @@ def recommendation_for_path(repo: Path, path_text: str) -> dict:
             "path": display,
             "kind": kind,
             "module": module,
-            "task_template": f":{module}:assembleHap",
+            "task_template": DEFAULT_HAP_BUILD_TASK,
             "confidence": "template",
             "requires_task_listing": False,
-            "reason": "页面、ArkTS 或资源改动通常优先选择对应模块级公开 hvigor 任务；实际任务名需以项目 tasks 列表为准。",
+            "reason": "页面、ArkTS 或资源改动默认使用裸 assembleHap；不要推断模块级公开任务名。",
         }
 
     if kind == "module_config" and module:
@@ -1001,10 +989,10 @@ def recommendation_for_path(repo: Path, path_text: str) -> dict:
             "path": display,
             "kind": kind,
             "module": module,
-            "task_template": f":{module}:assembleHap",
+            "task_template": DEFAULT_HAP_BUILD_TASK,
             "confidence": "template",
             "requires_task_listing": False,
-            "reason": "模块构建配置或依赖文件变更，优先选择模块级或构建相关公开 hvigor 任务模板。",
+            "reason": "模块构建配置或依赖文件变更默认使用裸 assembleHap；不要推断模块级公开任务名。",
         }
 
     if kind == "project_config":
@@ -1012,20 +1000,20 @@ def recommendation_for_path(repo: Path, path_text: str) -> dict:
             "path": display,
             "kind": kind,
             "module": None,
-            "task_template": "<project-level public build task from hvigor tasks>",
+            "task_template": DEFAULT_HAP_BUILD_TASK,
             "confidence": "template",
             "requires_task_listing": False,
-            "reason": "项目级构建配置变更影响范围可能跨模块，只能给出构建相关任务模板。",
+            "reason": "项目级构建配置变更默认使用裸 assembleHap。",
         }
 
     return {
         "path": display,
         "kind": kind,
         "module": module,
-        "task_template": None,
+        "task_template": DEFAULT_HAP_BUILD_TASK,
         "confidence": "unknown",
-        "requires_task_listing": True,
-        "reason": "未识别到可稳定映射的 Harmony 页面、资源或构建配置路径；需先列出公开 hvigor tasks 再选择任务。",
+        "requires_task_listing": False,
+        "reason": "未识别到更具体路径类型时仍默认使用裸 assembleHap；不要列公开 tasks 猜模块任务名。",
     }
 
 
@@ -1037,43 +1025,8 @@ def recommend_tasks_for_paths(repo_arg: str | None, paths: list[str]) -> dict:
         "repo": repo_info,
         "recommendations": recommendations,
         "needs_list_tasks": any(item["requires_task_listing"] for item in recommendations),
-        "list_tasks_hint": "Run `hvigor tasks` or this skill's list-tasks flow before treating templates as exact task names.",
+        "list_tasks_hint": "Unknown paths are not mapped to a build task by this helper. The build flow still defaults to assembleHap.",
     }
-
-
-def concrete_recommended_build_task(recommendations: dict | None) -> tuple[str | None, str]:
-    if not recommendations:
-        return None, "no path recommendation"
-    for item in recommendations.get("recommendations") or []:
-        template = item.get("task_template")
-        if template and not template.startswith("<"):
-            return template, f"selected path recommendation for {item.get('path')} without task listing"
-    return None, "no concrete path recommendation"
-
-
-def discover_harmony_modules(repo: Path) -> list[str]:
-    if not repo.exists() or not repo.is_dir():
-        return []
-
-    modules = []
-    for child in repo.iterdir():
-        if not child.is_dir() or child.name.startswith(".") or child.name in PROJECT_CONFIG_IGNORED_DIRS:
-            continue
-        if (child / "src" / "main" / "module.json5").is_file():
-            modules.append(child.name)
-            continue
-        if (child / "build-profile.json5").is_file() and (child / "src").is_dir():
-            modules.append(child.name)
-
-    preference = {name: index for index, name in enumerate(DEFAULT_MODULE_NAME_PREFERENCE)}
-    return sorted(set(modules), key=lambda name: (preference.get(name, len(preference)), name))
-
-
-def inferred_default_hap_task(repo: Path) -> tuple[str | None, str]:
-    modules = discover_harmony_modules(repo)
-    if modules:
-        return f":{modules[0]}:assembleHap", f"selected inferred module HAP task for {modules[0]} without task listing"
-    return None, "no Harmony module with src/main/module.json5 was found"
 
 
 def print_task_recommendations(result: dict) -> None:
@@ -1086,51 +1039,6 @@ def print_task_recommendations(result: dict) -> None:
         print(f"  reason: {item['reason']}")
     if result.get("needs_list_tasks"):
         print(result["list_tasks_hint"])
-
-
-def extract_public_tasks(tasks_output: str) -> list[str]:
-    tasks = []
-    seen = set()
-    for line in strip_ansi(tasks_output).splitlines():
-        match = TASK_LINE_RE.match(line)
-        if not match:
-            continue
-        task = match.group(1)
-        if task in seen:
-            continue
-        seen.add(task)
-        tasks.append(task)
-    return tasks
-
-
-def select_build_task(public_tasks: list[str], recommendations: dict | None = None) -> tuple[str | None, str]:
-    task_set = set(public_tasks)
-    if recommendations:
-        for item in recommendations.get("recommendations") or []:
-            template = item.get("task_template")
-            if template and template in task_set and not template.startswith("<"):
-                return template, f"selected path recommendation for {item.get('path')}"
-
-    for preferred in HAP_BUILD_TASK_PREFERENCE:
-        if preferred in task_set:
-            return preferred, "selected preferred public build task from hvigor tasks"
-    module_hap_tasks = sorted(task for task in public_tasks if task.endswith(":assembleHap"))
-    if module_hap_tasks:
-        preference = {name: index for index, name in enumerate(DEFAULT_MODULE_NAME_PREFERENCE)}
-        module_hap_tasks.sort(
-            key=lambda task: (
-                preference.get(task.split(":")[1] if task.startswith(":") and ":" in task[1:] else "", len(preference)),
-                task,
-            )
-        )
-        return module_hap_tasks[0], "selected module-level assembleHap from hvigor tasks"
-    for preferred in GENERIC_BUILD_TASK_PREFERENCE:
-        if preferred in task_set:
-            return preferred, "selected generic public build task from hvigor tasks"
-    for preferred in APP_BUILD_TASK_PREFERENCE:
-        if preferred in task_set:
-            return preferred, "selected app-level public build task from hvigor tasks"
-    return None, "no public build task matched known build task names"
 
 
 def build_selection_failure(
@@ -1672,7 +1580,6 @@ def build_project(
     paths: list[str] | None = None,
     task: str | None = None,
     timeout_seconds: int = HVIGOR_TASK_TIMEOUT_SECONDS,
-    list_timeout_seconds: int = HVIGOR_TASK_LIST_TIMEOUT_SECONDS,
     refresh: bool = False,
     progress=None,
 ) -> dict:
@@ -1683,126 +1590,9 @@ def build_project(
     recommendations = recommend_tasks_for_paths(repo_arg, paths) if paths else None
     task_list_outcome = None
     public_tasks: list[str] = []
-    selected_task = task
-    selection_reason = "explicit --task"
+    selected_task = task or DEFAULT_HAP_BUILD_TASK
+    selection_reason = "explicit --task" if task else "default assembleHap"
     refreshed_after_failure = False
-
-    if not selected_task:
-        selected_task, selection_reason = concrete_recommended_build_task(recommendations)
-    if not selected_task:
-        repo_path = Path((result.get("repo") or {}).get("local_path") or repo_arg or ".")
-        selected_task, selection_reason = inferred_default_hap_task(repo_path)
-    if not selected_task:
-        remaining = remaining_timeout_seconds(started_at, timeout_seconds)
-        if remaining <= 0:
-            verification = build_deadline_failure(started_at, timeout_seconds, "list-tasks", "tasks")
-            return compact_build_result_for_agent({
-                "detection": result,
-                "paths": paths,
-                "task_list": None,
-                "public_tasks": [],
-                "selected_task": None,
-                "selection_reason": "build flow timed out before listing public tasks",
-                "recommendations": recommendations,
-                "verification": verification,
-                "refreshed_after_failure": refreshed_after_failure,
-                "timeout_seconds": timeout_seconds,
-                "list_timeout_seconds": list_timeout_seconds,
-                "duration_seconds": verification.get("duration_seconds"),
-            })
-        task_list_timeout = min(list_timeout_seconds, remaining)
-        if result.get("ready"):
-            emit_build_progress(progress, "list-tasks", f"running `hvigor tasks` with timeout {task_list_timeout}s")
-        else:
-            emit_build_progress(progress, "list-tasks", "environment is not ready; skipping `hvigor tasks`")
-        task_list_outcome = annotate_hvigor_outcome(
-            verify_task(result, "tasks", task_list_timeout, full_output=True),
-            phase="list-tasks",
-            task="tasks",
-        )
-        if (
-            result.get("cache", {}).get("source") == "cache"
-            and not task_list_outcome["success"]
-            and looks_like_environment_failure(task_list_outcome["output"])
-        ):
-            emit_build_progress(progress, "detect", "refreshing environment baseline after cached task listing failed")
-            result = resolve_verification_detection(repo_arg, refresh=True)
-            remaining = remaining_timeout_seconds(started_at, timeout_seconds)
-            if remaining <= 0:
-                verification = build_deadline_failure(started_at, timeout_seconds, "list-tasks", "tasks")
-                return compact_build_result_for_agent({
-                    "detection": result,
-                    "paths": paths,
-                    "task_list": task_list_outcome,
-                    "public_tasks": [],
-                    "selected_task": None,
-                    "selection_reason": "build flow timed out before retrying public task listing",
-                    "recommendations": recommendations,
-                    "verification": verification,
-                    "refreshed_after_failure": True,
-                    "timeout_seconds": timeout_seconds,
-                    "list_timeout_seconds": list_timeout_seconds,
-                    "duration_seconds": verification.get("duration_seconds"),
-                })
-            task_list_timeout = min(list_timeout_seconds, remaining)
-            if result.get("ready"):
-                emit_build_progress(progress, "list-tasks", f"retrying `hvigor tasks` with timeout {task_list_timeout}s")
-            else:
-                emit_build_progress(progress, "list-tasks", "environment is not ready after refresh; skipping `hvigor tasks`")
-            task_list_outcome = annotate_hvigor_outcome(
-                verify_task(result, "tasks", task_list_timeout, full_output=True),
-                phase="list-tasks",
-                task="tasks",
-            )
-            refreshed_after_failure = True
-
-        if not task_list_outcome["success"]:
-            verification = build_selection_failure(
-                "Unable to choose a build task because `hvigor tasks` failed.\n"
-                + (task_list_outcome.get("output") or ""),
-                exit_code=task_list_outcome.get("exit_code", 1),
-                timed_out=task_list_outcome.get("timed_out", False),
-                duration_seconds=task_list_outcome.get("duration_seconds"),
-                phase="list-tasks",
-                task="tasks",
-            )
-            return compact_build_result_for_agent({
-                "detection": result,
-                "paths": paths,
-                "task_list": task_list_outcome,
-                "public_tasks": [],
-                "selected_task": None,
-                "selection_reason": "hvigor tasks failed; cannot choose a build task",
-                "recommendations": recommendations,
-                "verification": verification,
-                "refreshed_after_failure": refreshed_after_failure,
-                "timeout_seconds": timeout_seconds,
-                "list_timeout_seconds": list_timeout_seconds,
-                "duration_seconds": round(time.monotonic() - started_at, 3),
-            })
-
-        public_tasks = extract_public_tasks(task_list_outcome.get("output") or "")
-        selected_task, selection_reason = select_build_task(public_tasks, recommendations)
-        if not selected_task:
-            verification = build_selection_failure(
-                "Unable to choose a public build task automatically. "
-                "Pass --task with a public hvigor task from list-tasks.",
-                phase="select-task",
-            )
-            return compact_build_result_for_agent({
-                "detection": result,
-                "paths": paths,
-                "task_list": task_list_outcome,
-                "public_tasks": public_tasks,
-                "selected_task": None,
-                "selection_reason": selection_reason,
-                "recommendations": recommendations,
-                "verification": verification,
-                "refreshed_after_failure": refreshed_after_failure,
-                "timeout_seconds": timeout_seconds,
-                "list_timeout_seconds": list_timeout_seconds,
-                "duration_seconds": round(time.monotonic() - started_at, 3),
-            })
 
     remaining = remaining_timeout_seconds(started_at, timeout_seconds)
     if remaining <= 0:
@@ -1818,7 +1608,6 @@ def build_project(
             "verification": outcome,
             "refreshed_after_failure": refreshed_after_failure,
             "timeout_seconds": timeout_seconds,
-            "list_timeout_seconds": list_timeout_seconds,
             "duration_seconds": outcome.get("duration_seconds"),
         })
     if result.get("ready"):
@@ -1851,7 +1640,6 @@ def build_project(
                 "verification": outcome,
                 "refreshed_after_failure": True,
                 "timeout_seconds": timeout_seconds,
-                "list_timeout_seconds": list_timeout_seconds,
                 "duration_seconds": outcome.get("duration_seconds"),
             })
         if result.get("ready"):
@@ -1885,7 +1673,6 @@ def build_project(
         "verification": outcome,
         "refreshed_after_failure": refreshed_after_failure,
         "timeout_seconds": timeout_seconds,
-        "list_timeout_seconds": list_timeout_seconds,
         "duration_seconds": round(time.monotonic() - started_at, 3),
     })
 
@@ -2378,13 +2165,15 @@ def capture_hilog(
 
 
 def hap_artifact_rank(path: Path) -> tuple[int, float, str]:
-    parts = [part.casefold() for part in path.parts]
-    signed_rank = 0 if "signedhap" in parts else 1
     try:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = 0.0
-    return signed_rank, -mtime, str(path)
+    return -mtime, str(path)
+
+
+def is_signed_hap_artifact(path: Path) -> bool:
+    return path.suffix.casefold() == ".hap" and "signedhap" in [part.casefold() for part in path.parts]
 
 
 def find_hap_artifacts(repo: Path) -> list[Path]:
@@ -2399,7 +2188,7 @@ def find_hap_artifacts(repo: Path) -> list[Path]:
             relative_parts = path.parts
         if any(part in HAP_ARTIFACT_IGNORED_DIRS for part in relative_parts):
             continue
-        if path.is_file():
+        if path.is_file() and is_signed_hap_artifact(path):
             artifacts.append(path)
     return sorted(artifacts, key=hap_artifact_rank)
 
@@ -2409,15 +2198,16 @@ def resolve_hap_artifact(repo: Path, hap_path: str | None = None) -> tuple[Path 
         artifact = Path(hap_path).expanduser()
         if not artifact.is_absolute():
             artifact = repo / artifact
+        artifact = artifact.resolve()
+        if not is_signed_hap_artifact(artifact):
+            return artifact, "explicit --hap is not a signedHap .hap artifact"
         return artifact, "explicit --hap"
 
     artifacts = find_hap_artifacts(repo)
     if not artifacts:
-        return None, "no .hap artifact found under repo"
+        return None, "no signedHap .hap artifact found under repo"
     selected = artifacts[0]
-    if "signedhap" in [part.casefold() for part in selected.parts]:
-        return selected, "selected latest signedHap .hap artifact"
-    return selected, "selected latest .hap artifact"
+    return selected, "selected latest signedHap .hap artifact"
 
 
 def run_hdc_install_command(command: list[str], *, timeout_seconds: int) -> dict:
@@ -2472,7 +2262,7 @@ def install_hap(
     hdc_path, hdc_candidates = resolve_hdc_path(sdk_home)
     artifact, selection_reason = resolve_hap_artifact(repo, hap_path)
 
-    if not artifact or not artifact.is_file():
+    if not artifact or not artifact.is_file() or not is_signed_hap_artifact(artifact):
         return {
             "success": False,
             "exit_code": 2,
@@ -2494,7 +2284,7 @@ def install_hap(
             "install": {
                 "success": False,
                 "exit_code": 2,
-                "output": "No .hap artifact was found. Build with assembleHap and use the signedHap output, or pass --hap <path>.",
+                "output": "No signedHap .hap artifact was found. Build with assembleHap and install only the signedHap output, or pass --hap <signedHap .hap path>.",
                 "timed_out": False,
             },
         }
@@ -2722,25 +2512,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ignore cached ready baselines and rerun detection before verification.",
     )
 
-    build_parser_cmd = subparsers.add_parser("build", help="Automatically choose and run a public hvigor build task.")
+    build_parser_cmd = subparsers.add_parser("build", help="Run the default bare assembleHap build task.")
     build_parser_cmd.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
     build_parser_cmd.add_argument(
         "--task",
         type=hvigor_task_arg,
-        help="Explicit public hvigor task to run. Overrides automatic selection.",
+        help="Explicit public hvigor task to run. Overrides the default assembleHap task.",
     )
-    build_parser_cmd.add_argument("--paths", nargs="*", default=[], help="Changed paths used to prefer a smaller module build task.")
+    build_parser_cmd.add_argument("--paths", nargs="*", default=[], help="Changed paths recorded as context; they do not change the default assembleHap task.")
     build_parser_cmd.add_argument(
         "--timeout-seconds",
         type=positive_int,
         default=HVIGOR_TASK_TIMEOUT_SECONDS,
         help=f"Total hvigor wait budget for the build flow. Defaults to {HVIGOR_TASK_TIMEOUT_SECONDS}.",
-    )
-    build_parser_cmd.add_argument(
-        "--list-timeout-seconds",
-        type=positive_int,
-        default=HVIGOR_TASK_LIST_TIMEOUT_SECONDS,
-        help=f"Hard timeout for automatic `hvigor tasks` discovery. Defaults to {HVIGOR_TASK_LIST_TIMEOUT_SECONDS}.",
     )
     build_parser_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     build_parser_cmd.add_argument(
@@ -2753,7 +2537,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_hap_parser.add_argument("--repo", help="Harmony project root. Defaults to current working directory.")
     install_hap_parser.add_argument(
         "--hap",
-        help="Explicit .hap artifact path. Relative paths are resolved from --repo. Defaults to the preferred signedHap artifact.",
+        help="Explicit signedHap .hap artifact path. Relative paths are resolved from --repo. Omit to select the newest signedHap .hap artifact.",
     )
     install_hap_parser.add_argument("--target", help="hdc target id used with `hdc -t <target>` when multiple devices are connected.")
     install_hap_parser.add_argument(
@@ -2993,7 +2777,6 @@ def main() -> int:
                 paths=args.paths,
                 task=args.task,
                 timeout_seconds=args.timeout_seconds,
-                list_timeout_seconds=args.list_timeout_seconds,
                 refresh=args.refresh,
                 progress=progress,
             )
